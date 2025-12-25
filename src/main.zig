@@ -218,14 +218,17 @@ fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
 
     if (title.len == 0) fatal("Error: title required\n", .{});
 
-    const id = try generateId(allocator);
+    var storage = try openStorage(allocator);
+    defer storage.close();
+
+    const prefix = try getOrCreatePrefix(allocator, &storage);
+    defer allocator.free(prefix);
+
+    const id = try generateId(allocator, prefix);
     defer allocator.free(id);
 
     var ts_buf: [40]u8 = undefined;
     const now = try formatTimestamp(&ts_buf);
-
-    var storage = try openStorage(allocator);
-    defer storage.close();
 
     const issue = sqlite.Issue{
         .id = id,
@@ -432,13 +435,35 @@ fn cmdBeadsClose(allocator: Allocator, args: []const []const u8) !void {
     try storage.updateStatus(args[0], "closed", now, now, reason);
 }
 
-fn generateId(allocator: Allocator) ![]u8 {
+fn generateId(allocator: Allocator, prefix: []const u8) ![]u8 {
     // Use microseconds (48-bit) + random (16-bit) for collision resistance
     const ts = std.time.microTimestamp();
     if (ts < 0) return error.InvalidTimestamp;
     const micros: u48 = @truncate(@as(u64, @intCast(ts)));
     const rand: u16 = std.crypto.random.int(u16);
-    return std.fmt.allocPrint(allocator, "bd-{x}{x:0>4}", .{ micros, rand });
+    return std.fmt.allocPrint(allocator, "{s}-{x}{x:0>4}", .{ prefix, micros, rand });
+}
+
+fn getOrCreatePrefix(allocator: Allocator, storage: *sqlite.Storage) ![]const u8 {
+    // Try to get prefix from database config
+    if (try storage.getConfig("issue_prefix")) |prefix| {
+        return prefix;
+    }
+
+    // Auto-detect from directory name (like beads does)
+    const cwd = std.fs.cwd();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = cwd.realpath(".", &path_buf) catch return allocator.dupe(u8, "dot");
+    const basename = std.fs.path.basename(path);
+
+    // Strip trailing hyphens like beads does
+    var prefix = std.mem.trimRight(u8, basename, "-");
+    if (prefix.len == 0) prefix = "dot";
+
+    // Store it in config for future use
+    try storage.setConfig("issue_prefix", prefix);
+
+    return allocator.dupe(u8, prefix);
 }
 
 fn formatTimestamp(buf: []u8) ![]const u8 {
@@ -576,6 +601,10 @@ fn hookSync(allocator: Allocator) !void {
     var storage = openStorage(allocator) catch return;
     defer storage.close();
 
+    // Get prefix for ID generation
+    const prefix = getOrCreatePrefix(allocator, &storage) catch return;
+    defer allocator.free(prefix);
+
     // Load mapping
     var mapping = loadMapping(allocator);
     defer {
@@ -609,7 +638,7 @@ fn hookSync(allocator: Allocator) !void {
             }
         } else if (mapping.get(content) == null) {
             // Create new dot
-            const id = generateId(allocator) catch continue;
+            const id = generateId(allocator, prefix) catch continue;
             const desc = if (todo.get("activeForm")) |v| (if (v == .string) v.string else "") else "";
             const priority: i64 = if (std.mem.eql(u8, status, "in_progress")) 1 else 2;
 

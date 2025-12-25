@@ -609,6 +609,28 @@ pub const Storage = struct {
 
         return issues.toOwnedSlice(self.allocator);
     }
+
+    // Get config value from config table
+    pub fn getConfig(self: *Self, key: []const u8) !?[]const u8 {
+        var stmt = try self.db.prepare("SELECT value FROM config WHERE key = ?1");
+        defer stmt.finalize();
+        try stmt.bindText(1, key);
+        if (try stmt.step()) {
+            if (stmt.columnText(0)) |value| {
+                return try self.allocator.dupe(u8, value);
+            }
+        }
+        return null;
+    }
+
+    // Set config value in config table
+    pub fn setConfig(self: *Self, key: []const u8, value: []const u8) !void {
+        var stmt = try self.db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES (?1, ?2)");
+        defer stmt.finalize();
+        try stmt.bindText(1, key);
+        try stmt.bindText(2, value);
+        _ = try stmt.step();
+    }
 };
 
 // Hydrate from beads JSONL
