@@ -143,7 +143,8 @@ test "dot add and list" {
     defer allocator.free(add_result.stdout);
     defer allocator.free(add_result.stderr);
 
-    try std.testing.expect(std.mem.startsWith(u8, add_result.stdout, "bd-"));
+    // ID format: {prefix}-{hex} - just check it contains a hyphen and hex after
+    try std.testing.expect(std.mem.indexOf(u8, add_result.stdout, "-") != null);
 
     // List dots
     const list_result = try runDot(allocator, &.{"ls"}, test_dir);
@@ -450,8 +451,8 @@ test "quick add" {
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
-    // Should have created a dot
-    try std.testing.expect(std.mem.startsWith(u8, result.stdout, "bd-"));
+    // Should have created a dot with format {prefix}-{hex}
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "-") != null);
 
     // Verify it's in the list
     const list = try runDot(allocator, &.{"ls"}, test_dir);

@@ -453,7 +453,12 @@ fn getOrCreatePrefix(allocator: Allocator, storage: *sqlite.Storage) ![]const u8
     // Auto-detect from directory name (like beads does)
     const cwd = std.fs.cwd();
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = cwd.realpath(".", &path_buf) catch return allocator.dupe(u8, "dot");
+    const path = cwd.realpath(".", &path_buf) catch {
+        // Fallback if realpath fails - store it so we don't retry
+        const fallback = "dot";
+        try storage.setConfig("issue_prefix", fallback);
+        return allocator.dupe(u8, fallback);
+    };
     const basename = std.fs.path.basename(path);
 
     // Strip trailing hyphens like beads does
