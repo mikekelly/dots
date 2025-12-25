@@ -2,6 +2,7 @@ const std = @import("std");
 const fs = std.fs;
 const Allocator = std.mem.Allocator;
 const sqlite = @import("sqlite.zig");
+const build_options = @import("build_options");
 
 const libc = @cImport({
     @cInclude("time.h");
@@ -72,7 +73,9 @@ pub fn main() !void {
     // Special commands
     if (std.mem.eql(u8, cmd, "init")) return cmdInit(allocator);
     if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) return stdout().writeAll(USAGE);
-    if (std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-v")) return stdout().writeAll("dots 0.2.0\n");
+    if (std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-v")) {
+        return stdout().print("dots {s} ({s})\n", .{ build_options.version, build_options.git_hash });
+    }
 
     // Dispatch from table
     if (findCommand(cmd)) |handler| {

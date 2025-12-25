@@ -1,8 +1,13 @@
 const std = @import("std");
 
+const version = "0.2.0";
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    // Get git short hash (trimmed)
+    const git_hash = std.mem.trim(u8, b.run(&.{ "git", "rev-parse", "--short", "HEAD" }), "\n\r ");
 
     const exe = b.addExecutable(.{
         .name = "dot",
@@ -13,6 +18,11 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", version);
+    options.addOption([]const u8, "git_hash", git_hash);
+    exe.root_module.addOptions("build_options", options);
 
     // Link SQLite statically
     exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/Cellar/sqlite/3.51.1/lib/libsqlite3.a" });
