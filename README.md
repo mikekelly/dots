@@ -1,3 +1,5 @@
+![Connect the dots](assets/banner.jpg)
+
 # dots
 
 > **Like beads, but smaller and faster!**
