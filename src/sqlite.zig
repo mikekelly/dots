@@ -176,7 +176,29 @@ pub const Issue = struct {
     // Dependency (for ready check)
     after: ?[]const u8,
     parent: ?[]const u8,
+
+    pub fn deinit(self: *const Issue, allocator: Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.title);
+        allocator.free(self.description);
+        allocator.free(self.status);
+        allocator.free(self.issue_type);
+        if (self.assignee) |s| allocator.free(s);
+        allocator.free(self.created_at);
+        allocator.free(self.updated_at);
+        if (self.closed_at) |s| allocator.free(s);
+        if (self.close_reason) |s| allocator.free(s);
+        if (self.after) |s| allocator.free(s);
+        if (self.parent) |s| allocator.free(s);
+    }
 };
+
+pub fn freeIssues(allocator: Allocator, issues: []const Issue) void {
+    for (issues) |*issue| {
+        issue.deinit(allocator);
+    }
+    allocator.free(issues);
+}
 
 pub const Storage = struct {
     db: Db,
@@ -198,7 +220,6 @@ pub const Storage = struct {
         errdefer db.close();
 
         // Create schema
-        var start: usize = 0;
         var iter = std.mem.splitSequence(u8, SCHEMA, ";");
         while (iter.next()) |sql| {
             const trimmed = std.mem.trim(u8, sql, " \n\r\t");
@@ -213,27 +234,48 @@ pub const Storage = struct {
                 std.debug.print("SQL error at: {s}\n", .{trimmed});
                 return err;
             };
-            start += sql.len + 1;
         }
+
+        // Prepare statements with proper cleanup on failure
+        var insert_stmt = try db.prepare(
+            "INSERT INTO issues (id, title, description, status, priority, issue_type, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        );
+        errdefer insert_stmt.finalize();
+
+        var update_status_stmt = try db.prepare(
+            "UPDATE issues SET status = ?2, updated_at = ?3, closed_at = ?4, close_reason = ?5 WHERE id = ?1",
+        );
+        errdefer update_status_stmt.finalize();
+
+        var delete_stmt = try db.prepare("DELETE FROM issues WHERE id = ?1");
+        errdefer delete_stmt.finalize();
+
+        var get_by_id_stmt = try db.prepare("SELECT id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at, close_reason FROM issues WHERE id = ?1");
+        errdefer get_by_id_stmt.finalize();
+
+        var list_stmt = try db.prepare("SELECT id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at, close_reason FROM issues ORDER BY priority, created_at");
+        errdefer list_stmt.finalize();
+
+        var add_dep_stmt = try db.prepare(
+            "INSERT OR REPLACE INTO dependencies (issue_id, depends_on_id, type, created_at, created_by) VALUES (?1, ?2, ?3, ?4, ?5)",
+        );
+        errdefer add_dep_stmt.finalize();
+
+        var get_blockers_stmt = try db.prepare(
+            "SELECT depends_on_id FROM dependencies WHERE issue_id = ?1 AND type = 'blocks'",
+        );
+        errdefer get_blockers_stmt.finalize();
 
         return Self{
             .db = db,
             .allocator = allocator,
-            .insert_stmt = try db.prepare(
-                "INSERT INTO issues (id, title, description, status, priority, issue_type, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            ),
-            .update_status_stmt = try db.prepare(
-                "UPDATE issues SET status = ?2, updated_at = ?3, closed_at = ?4, close_reason = ?5 WHERE id = ?1",
-            ),
-            .delete_stmt = try db.prepare("DELETE FROM issues WHERE id = ?1"),
-            .get_by_id_stmt = try db.prepare("SELECT id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at, close_reason FROM issues WHERE id = ?1"),
-            .list_stmt = try db.prepare("SELECT id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at, close_reason FROM issues ORDER BY priority, created_at"),
-            .add_dep_stmt = try db.prepare(
-                "INSERT OR REPLACE INTO dependencies (issue_id, depends_on_id, type, created_at, created_by) VALUES (?1, ?2, ?3, ?4, ?5)",
-            ),
-            .get_blockers_stmt = try db.prepare(
-                "SELECT depends_on_id FROM dependencies WHERE issue_id = ?1 AND type = 'blocks'",
-            ),
+            .insert_stmt = insert_stmt,
+            .update_status_stmt = update_status_stmt,
+            .delete_stmt = delete_stmt,
+            .get_by_id_stmt = get_by_id_stmt,
+            .list_stmt = list_stmt,
+            .add_dep_stmt = add_dep_stmt,
+            .get_blockers_stmt = get_blockers_stmt,
         };
     }
 
@@ -307,13 +349,19 @@ pub const Storage = struct {
 
     pub fn listIssues(self: *Self, status_filter: ?[]const u8) ![]Issue {
         var issues: std.ArrayList(Issue) = .empty;
-        errdefer issues.deinit(self.allocator);
+        errdefer {
+            for (issues.items) |*iss| iss.deinit(self.allocator);
+            issues.deinit(self.allocator);
+        }
 
         self.list_stmt.reset();
         while (try self.list_stmt.step()) {
             const issue = try self.rowToIssue(&self.list_stmt);
             if (status_filter) |filter| {
-                if (!std.mem.eql(u8, issue.status, filter)) continue;
+                if (!std.mem.eql(u8, issue.status, filter)) {
+                    issue.deinit(self.allocator);
+                    continue;
+                }
             }
             try issues.append(self.allocator, issue);
         }
@@ -342,7 +390,10 @@ pub const Storage = struct {
         defer stmt.finalize();
 
         var issues: std.ArrayList(Issue) = .empty;
-        errdefer issues.deinit(self.allocator);
+        errdefer {
+            for (issues.items) |*iss| iss.deinit(self.allocator);
+            issues.deinit(self.allocator);
+        }
 
         while (try stmt.step()) {
             try issues.append(self.allocator, try self.rowToIssue(&stmt));
@@ -352,18 +403,48 @@ pub const Storage = struct {
     }
 
     fn rowToIssue(self: *Self, stmt: *Statement) !Issue {
+        const id = try self.dupeText(stmt.columnText(0) orelse "");
+        errdefer self.allocator.free(id);
+
+        const title = try self.dupeText(stmt.columnText(1) orelse "");
+        errdefer self.allocator.free(title);
+
+        const description = try self.dupeText(stmt.columnText(2) orelse "");
+        errdefer self.allocator.free(description);
+
+        const status = try self.dupeText(stmt.columnText(3) orelse "open");
+        errdefer self.allocator.free(status);
+
+        const issue_type = try self.dupeText(stmt.columnText(5) orelse "task");
+        errdefer self.allocator.free(issue_type);
+
+        const assignee = if (stmt.columnText(6)) |t| try self.dupeText(t) else null;
+        errdefer if (assignee) |a| self.allocator.free(a);
+
+        const created_at = try self.dupeText(stmt.columnText(7) orelse "");
+        errdefer self.allocator.free(created_at);
+
+        const updated_at = try self.dupeText(stmt.columnText(8) orelse "");
+        errdefer self.allocator.free(updated_at);
+
+        const closed_at = if (stmt.columnText(9)) |t| try self.dupeText(t) else null;
+        errdefer if (closed_at) |s| self.allocator.free(s);
+
+        const close_reason = if (stmt.columnText(10)) |t| try self.dupeText(t) else null;
+        errdefer if (close_reason) |s| self.allocator.free(s);
+
         return Issue{
-            .id = try self.dupeText(stmt.columnText(0) orelse ""),
-            .title = try self.dupeText(stmt.columnText(1) orelse ""),
-            .description = try self.dupeText(stmt.columnText(2) orelse ""),
-            .status = try self.dupeText(stmt.columnText(3) orelse "open"),
+            .id = id,
+            .title = title,
+            .description = description,
+            .status = status,
             .priority = stmt.columnInt(4),
-            .issue_type = try self.dupeText(stmt.columnText(5) orelse "task"),
-            .assignee = if (stmt.columnText(6)) |t| try self.dupeText(t) else null,
-            .created_at = try self.dupeText(stmt.columnText(7) orelse ""),
-            .updated_at = try self.dupeText(stmt.columnText(8) orelse ""),
-            .closed_at = if (stmt.columnText(9)) |t| try self.dupeText(t) else null,
-            .close_reason = if (stmt.columnText(10)) |t| try self.dupeText(t) else null,
+            .issue_type = issue_type,
+            .assignee = assignee,
+            .created_at = created_at,
+            .updated_at = updated_at,
+            .closed_at = closed_at,
+            .close_reason = close_reason,
             .after = null,
             .parent = null,
         };
@@ -397,7 +478,10 @@ pub const Storage = struct {
         defer stmt.finalize();
 
         var ids: std.ArrayList([]const u8) = .empty;
-        errdefer ids.deinit(self.allocator);
+        errdefer {
+            for (ids.items) |id| self.allocator.free(id);
+            ids.deinit(self.allocator);
+        }
 
         while (try stmt.step()) {
             if (stmt.columnText(0)) |id| {
@@ -435,7 +519,10 @@ pub const Storage = struct {
         try stmt.bindText(1, parent_id);
 
         var issues: std.ArrayList(Issue) = .empty;
-        errdefer issues.deinit(self.allocator);
+        errdefer {
+            for (issues.items) |*iss| iss.deinit(self.allocator);
+            issues.deinit(self.allocator);
+        }
 
         while (try stmt.step()) {
             try issues.append(self.allocator, try self.rowToIssue(&stmt));
@@ -462,7 +549,10 @@ pub const Storage = struct {
         defer stmt.finalize();
 
         var issues: std.ArrayList(Issue) = .empty;
-        errdefer issues.deinit(self.allocator);
+        errdefer {
+            for (issues.items) |*iss| iss.deinit(self.allocator);
+            issues.deinit(self.allocator);
+        }
 
         while (try stmt.step()) {
             try issues.append(self.allocator, try self.rowToIssue(&stmt));
@@ -503,7 +593,10 @@ pub const Storage = struct {
         try stmt.bindText(1, query);
 
         var issues: std.ArrayList(Issue) = .empty;
-        errdefer issues.deinit(self.allocator);
+        errdefer {
+            for (issues.items) |*iss| iss.deinit(self.allocator);
+            issues.deinit(self.allocator);
+        }
 
         while (try stmt.step()) {
             try issues.append(self.allocator, try self.rowToIssue(&stmt));
@@ -533,19 +626,20 @@ pub fn hydrateFromJsonl(storage: *Storage, allocator: Allocator, jsonl_path: []c
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch continue;
         defer parsed.deinit();
 
+        if (parsed.value != .object) continue;
         const obj = parsed.value.object;
 
         // Map beads fields to our schema
-        const id = if (obj.get("id")) |v| v.string else continue;
-        const title = if (obj.get("title")) |v| v.string else continue;
-        const description = if (obj.get("description")) |v| v.string else "";
-        const status_raw = if (obj.get("status")) |v| v.string else "open";
-        const priority: i64 = if (obj.get("priority")) |v| v.integer else 2;
-        const issue_type = if (obj.get("issue_type")) |v| v.string else "task";
-        const created_at = if (obj.get("created_at")) |v| v.string else "";
-        const updated_at = if (obj.get("updated_at")) |v| v.string else created_at;
-        const closed_at = if (obj.get("closed_at")) |v| v.string else null;
-        const close_reason = if (obj.get("close_reason")) |v| v.string else null;
+        const id = if (obj.get("id")) |v| (if (v == .string) v.string else continue) else continue;
+        const title = if (obj.get("title")) |v| (if (v == .string) v.string else continue) else continue;
+        const description = if (obj.get("description")) |v| (if (v == .string) v.string else "") else "";
+        const status_raw = if (obj.get("status")) |v| (if (v == .string) v.string else "open") else "open";
+        const priority: i64 = if (obj.get("priority")) |v| (if (v == .integer) v.integer else 2) else 2;
+        const issue_type = if (obj.get("issue_type")) |v| (if (v == .string) v.string else "task") else "task";
+        const created_at = if (obj.get("created_at")) |v| (if (v == .string) v.string else "") else "";
+        const updated_at = if (obj.get("updated_at")) |v| (if (v == .string) v.string else created_at) else created_at;
+        const closed_at = if (obj.get("closed_at")) |v| (if (v == .string) v.string else null) else null;
+        const close_reason = if (obj.get("close_reason")) |v| (if (v == .string) v.string else null) else null;
 
         // Map beads status to dots status
         const status = if (std.mem.eql(u8, status_raw, "in_progress")) "active" else if (std.mem.eql(u8, status_raw, "closed")) "done" else status_raw;
@@ -557,7 +651,7 @@ pub fn hydrateFromJsonl(storage: *Storage, allocator: Allocator, jsonl_path: []c
             .status = status,
             .priority = priority,
             .issue_type = issue_type,
-            .assignee = if (obj.get("assignee")) |v| v.string else null,
+            .assignee = if (obj.get("assignee")) |v| (if (v == .string) v.string else null) else null,
             .created_at = created_at,
             .updated_at = updated_at,
             .closed_at = closed_at,
@@ -568,13 +662,14 @@ pub fn hydrateFromJsonl(storage: *Storage, allocator: Allocator, jsonl_path: []c
 
         storage.createIssue(issue) catch continue;
 
-        // Handle dependencies
+        // Handle dependencies (only if it's a valid array)
         if (obj.get("dependencies")) |deps_val| {
-            if (deps_val.array.items.len > 0) {
+            if (deps_val == .array) {
                 for (deps_val.array.items) |dep| {
+                    if (dep != .object) continue;
                     const dep_obj = dep.object;
-                    const depends_on_id = if (dep_obj.get("depends_on_id")) |v| v.string else continue;
-                    const dep_type = if (dep_obj.get("type")) |v| v.string else "blocks";
+                    const depends_on_id = if (dep_obj.get("depends_on_id")) |v| (if (v == .string) v.string else continue) else continue;
+                    const dep_type = if (dep_obj.get("type")) |v| (if (v == .string) v.string else "blocks") else "blocks";
                     storage.addDependency(id, depends_on_id, dep_type, created_at) catch continue;
                 }
             }

@@ -27,6 +27,7 @@ const commands = [_]Command{
     .{ .names = &.{"find"}, .handler = cmdFind },
     .{ .names = &.{"update"}, .handler = cmdBeadsUpdate },
     .{ .names = &.{"close"}, .handler = cmdBeadsClose },
+    .{ .names = &.{"hook"}, .handler = cmdHook },
 };
 
 fn findCommand(name: []const u8) ?Handler {
@@ -39,13 +40,12 @@ fn findCommand(name: []const u8) ?Handler {
 }
 
 fn isCommand(s: []const u8) bool {
-    return findCommand(s) != null or
-        std.mem.eql(u8, s, "init") or
-        std.mem.eql(u8, s, "help") or
-        std.mem.eql(u8, s, "--help") or
-        std.mem.eql(u8, s, "-h") or
-        std.mem.eql(u8, s, "--version") or
-        std.mem.eql(u8, s, "-v");
+    const specials = [_][]const u8{ "init", "help", "--help", "-h", "--version", "-v" };
+    if (findCommand(s) != null) return true;
+    inline for (specials) |sp| {
+        if (std.mem.eql(u8, s, sp)) return true;
+    }
+    return false;
 }
 
 pub fn main() !void {
@@ -168,7 +168,10 @@ fn cmdInit(allocator: Allocator) !void {
         else => return err,
     };
 
-    const jsonl_exists = fs.cwd().access(BEADS_JSONL, .{}) != error.FileNotFound;
+    const jsonl_exists = blk: {
+        fs.cwd().access(BEADS_JSONL, .{}) catch break :blk false;
+        break :blk true;
+    };
 
     var storage = try openStorage(allocator);
     defer storage.close();
@@ -252,7 +255,7 @@ fn cmdList(allocator: Allocator, args: []const []const u8) !void {
     defer storage.close();
 
     const issues = try storage.listIssues(filter_status);
-    defer allocator.free(issues);
+    defer sqlite.freeIssues(allocator, issues);
 
     try writeIssueList(issues, filter_status == null, hasFlag(args, "--json"));
 }
@@ -262,7 +265,7 @@ fn cmdReady(allocator: Allocator, args: []const []const u8) !void {
     defer storage.close();
 
     const issues = try storage.getReadyIssues();
-    defer allocator.free(issues);
+    defer sqlite.freeIssues(allocator, issues);
 
     try writeIssueList(issues, false, hasFlag(args, "--json"));
 }
@@ -333,6 +336,7 @@ fn cmdShow(allocator: Allocator, args: []const []const u8) !void {
     defer storage.close();
 
     const iss = try storage.getIssue(args[0]) orelse fatal("Issue not found: {s}\n", .{args[0]});
+    defer iss.deinit(allocator);
 
     const w = stdout();
     try w.print("ID:       {s}\nTitle:    {s}\nStatus:   {s}\nPriority: {d}\n", .{ iss.id, iss.title, iss.status, iss.priority });
@@ -349,14 +353,14 @@ fn cmdTree(allocator: Allocator, args: []const []const u8) !void {
     defer storage.close();
 
     const roots = try storage.getRootIssues();
-    defer allocator.free(roots);
+    defer sqlite.freeIssues(allocator, roots);
 
     const w = stdout();
     for (roots) |root| {
         try w.print("[{s}] {s} {s}\n", .{ root.id, statusSym(root.status), root.title });
 
         const children = try storage.getChildren(root.id);
-        defer allocator.free(children);
+        defer sqlite.freeIssues(allocator, children);
 
         for (children) |child| {
             const blocked_msg: []const u8 = if (try storage.isBlocked(child.id)) " (blocked)" else "";
@@ -372,7 +376,7 @@ fn cmdFind(allocator: Allocator, args: []const []const u8) !void {
     defer storage.close();
 
     const issues = try storage.searchIssues(args[0]);
-    defer allocator.free(issues);
+    defer sqlite.freeIssues(allocator, issues);
 
     const w = stdout();
     for (issues) |issue| {
@@ -420,8 +424,9 @@ fn cmdBeadsClose(allocator: Allocator, args: []const []const u8) !void {
 
 fn generateId(allocator: Allocator) ![]u8 {
     const nanos = std.time.nanoTimestamp();
-    const ts: u64 = @intCast(@as(u128, @intCast(nanos)) & 0xFFFFFFFF);
-    return std.fmt.allocPrint(allocator, "bd-{x}", .{@as(u16, @truncate(ts))});
+    // Use microseconds with 32-bit truncation for ~4 billion unique IDs
+    const micros: u64 = @intCast(@as(u128, @intCast(nanos)) / 1000);
+    return std.fmt.allocPrint(allocator, "bd-{x}", .{@as(u32, @truncate(micros))});
 }
 
 fn formatTimestamp(buf: []u8) ![]const u8 {
@@ -431,7 +436,10 @@ fn formatTimestamp(buf: []u8) ![]const u8 {
     const micros: u64 = @intCast((epoch_nanos % 1_000_000_000) / 1000);
 
     var tm: libc.struct_tm = undefined;
-    _ = libc.localtime_r(&epoch_secs, &tm);
+    if (libc.localtime_r(&epoch_secs, &tm) == null) {
+        // Fallback to UTC epoch on failure
+        return std.fmt.bufPrint(buf, "1970-01-01T00:00:00.000000+00:00", .{});
+    }
 
     const year: u64 = @intCast(tm.tm_year + 1900);
     const month: u64 = @intCast(tm.tm_mon + 1);
@@ -492,10 +500,244 @@ fn writeJsonString(s: []const u8, w: Writer) !void {
             '\n' => try w.writeAll("\\n"),
             '\r' => try w.writeAll("\\r"),
             '\t' => try w.writeAll("\\t"),
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => {
+                try w.print("\\u{x:0>4}", .{c});
+            },
             else => try w.writeByte(c),
         }
     }
     try w.writeByte('"');
+}
+
+// Claude Code hook handlers
+fn cmdHook(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len == 0) fatal("Usage: dot hook <session|sync>\n", .{});
+
+    if (std.mem.eql(u8, args[0], "session")) {
+        try hookSession(allocator);
+    } else if (std.mem.eql(u8, args[0], "sync")) {
+        try hookSync(allocator);
+    } else {
+        fatal("Unknown hook: {s}\n", .{args[0]});
+    }
+}
+
+fn hookSession(allocator: Allocator) !void {
+    // Check if .beads exists
+    fs.cwd().access(BEADS_DIR, .{}) catch return;
+
+    var storage = openStorage(allocator) catch return;
+    defer storage.close();
+
+    const active = storage.listIssues("active") catch return;
+    defer sqlite.freeIssues(allocator, active);
+
+    const ready = storage.getReadyIssues() catch return;
+    defer sqlite.freeIssues(allocator, ready);
+
+    if (active.len == 0 and ready.len == 0) return;
+
+    const w = stdout();
+    try w.writeAll("--- DOTS ---\n");
+    if (active.len > 0) {
+        try w.writeAll("ACTIVE:\n");
+        for (active) |d| try w.print("  [{s}] {s}\n", .{ d.id, d.title });
+    }
+    if (ready.len > 0) {
+        try w.writeAll("READY:\n");
+        for (ready) |d| try w.print("  [{s}] {s}\n", .{ d.id, d.title });
+    }
+}
+
+const MAPPING_FILE = ".beads/todo-mapping.json";
+
+fn hookSync(allocator: Allocator) !void {
+    // Read stdin
+    const input = fs.File.stdin().readToEndAlloc(allocator, 1024 * 1024) catch return;
+    defer allocator.free(input);
+
+    // Parse JSON
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, input, .{}) catch return;
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return;
+    const root = parsed.value.object;
+
+    // Check if TodoWrite
+    const tool_name = root.get("tool_name") orelse return;
+    if (tool_name != .string or !std.mem.eql(u8, tool_name.string, "TodoWrite")) return;
+
+    const tool_input = root.get("tool_input") orelse return;
+    if (tool_input != .object) return;
+
+    const todos = tool_input.object.get("todos") orelse return;
+    if (todos != .array) return;
+
+    // Ensure .beads exists
+    fs.cwd().makeDir(BEADS_DIR) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return,
+    };
+
+    var storage = openStorage(allocator) catch return;
+    defer storage.close();
+
+    // Load mapping
+    var mapping = loadMapping(allocator);
+    defer {
+        var it = mapping.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
+        mapping.deinit();
+    }
+
+    var ts_buf: [40]u8 = undefined;
+    const now = formatTimestamp(&ts_buf) catch return;
+
+    // Process todos
+    for (todos.array.items) |todo_val| {
+        if (todo_val != .object) continue;
+        const todo = todo_val.object;
+
+        const content = if (todo.get("content")) |v| (if (v == .string) v.string else continue) else continue;
+        const status = if (todo.get("status")) |v| (if (v == .string) v.string else "pending") else "pending";
+
+        if (std.mem.eql(u8, status, "completed")) {
+            // Mark as done if we have mapping
+            if (mapping.get(content)) |dot_id| {
+                storage.updateStatus(dot_id, "done", now, now, "Completed via TodoWrite") catch {};
+                if (mapping.fetchRemove(content)) |kv| {
+                    allocator.free(kv.key);
+                    allocator.free(kv.value);
+                }
+            }
+        } else if (mapping.get(content) == null) {
+            // Create new dot
+            const id = generateId(allocator) catch continue;
+            const desc = if (todo.get("activeForm")) |v| (if (v == .string) v.string else "") else "";
+            const priority: i64 = if (std.mem.eql(u8, status, "in_progress")) 1 else 2;
+
+            const issue = sqlite.Issue{
+                .id = id,
+                .title = content,
+                .description = desc,
+                .status = if (std.mem.eql(u8, status, "in_progress")) "active" else "open",
+                .priority = priority,
+                .issue_type = "task",
+                .assignee = null,
+                .created_at = now,
+                .updated_at = now,
+                .closed_at = null,
+                .close_reason = null,
+                .after = null,
+                .parent = null,
+            };
+
+            storage.createIssue(issue) catch {
+                allocator.free(id);
+                continue;
+            };
+
+            // Save mapping
+            const key = allocator.dupe(u8, content) catch {
+                allocator.free(id);
+                continue;
+            };
+            const val = allocator.dupe(u8, id) catch {
+                allocator.free(key);
+                allocator.free(id);
+                continue;
+            };
+            mapping.put(key, val) catch {
+                allocator.free(key);
+                allocator.free(val);
+            };
+            allocator.free(id);
+        }
+    }
+
+    // Save mapping
+    saveMapping(allocator, mapping);
+}
+
+fn loadMapping(allocator: Allocator) std.StringHashMap([]const u8) {
+    var map = std.StringHashMap([]const u8).init(allocator);
+
+    const file = fs.cwd().openFile(MAPPING_FILE, .{}) catch return map;
+    defer file.close();
+
+    const content = file.readToEndAlloc(allocator, 1024 * 1024) catch return map;
+    defer allocator.free(content);
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{}) catch return map;
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return map;
+
+    var it = parsed.value.object.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.* != .string) continue;
+        const key = allocator.dupe(u8, entry.key_ptr.*) catch continue;
+        const val = allocator.dupe(u8, entry.value_ptr.string) catch {
+            allocator.free(key);
+            continue;
+        };
+        map.put(key, val) catch {
+            allocator.free(key);
+            allocator.free(val);
+        };
+    }
+
+    return map;
+}
+
+fn saveMapping(allocator: Allocator, map: std.StringHashMap([]const u8)) void {
+    const file = fs.cwd().createFile(MAPPING_FILE, .{}) catch return;
+    defer file.close();
+
+    // Build JSON manually
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    buf.appendSlice(allocator, "{") catch return;
+    var first = true;
+    var it = map.iterator();
+    while (it.next()) |entry| {
+        if (!first) buf.appendSlice(allocator, ",") catch return;
+        first = false;
+        // Escape keys (content may have quotes)
+        appendJsonString(&buf, allocator, entry.key_ptr.*) catch return;
+        buf.appendSlice(allocator, ":") catch return;
+        // Values are IDs (safe, no escaping needed)
+        buf.appendSlice(allocator, "\"") catch return;
+        buf.appendSlice(allocator, entry.value_ptr.*) catch return;
+        buf.appendSlice(allocator, "\"") catch return;
+    }
+    buf.appendSlice(allocator, "}") catch return;
+
+    _ = file.write(buf.items) catch return;
+}
+
+fn appendJsonString(buf: *std.ArrayList(u8), allocator: Allocator, s: []const u8) !void {
+    try buf.append(allocator, '"');
+    for (s) |c| {
+        switch (c) {
+            '"' => try buf.appendSlice(allocator, "\\\""),
+            '\\' => try buf.appendSlice(allocator, "\\\\"),
+            '\n' => try buf.appendSlice(allocator, "\\n"),
+            '\r' => try buf.appendSlice(allocator, "\\r"),
+            '\t' => try buf.appendSlice(allocator, "\\t"),
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => {
+                var escape: [6]u8 = undefined;
+                _ = std.fmt.bufPrint(&escape, "\\u{x:0>4}", .{c}) catch unreachable;
+                try buf.appendSlice(allocator, &escape);
+            },
+            else => try buf.append(allocator, c),
+        }
+    }
+    try buf.append(allocator, '"');
 }
 
 test "basic" {
