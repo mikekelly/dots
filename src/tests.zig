@@ -26,15 +26,17 @@ fn isBlocking(status: Status) bool {
 }
 
 fn oracleReady(statuses: [4]Status, deps: [4][4]bool) [4]bool {
-    // Filter out cycles: if deps[i][j] and deps[j][i], later one is skipped
-    var effective_deps: [4][4]bool = undefined;
+    // Simulate insertion order and detect transitive cycles
+    var effective_deps = [_][4]bool{[_]bool{false} ** 4} ** 4;
+
+    // Insert dependencies in order, skip if would create cycle
     for (0..4) |i| {
         for (0..4) |j| {
-            if (deps[i][j] and deps[j][i] and j < i) {
-                // Cycle: j->i was added first, skip i->j
-                effective_deps[i][j] = false;
-            } else {
-                effective_deps[i][j] = deps[i][j];
+            if (deps[i][j]) {
+                // Check if j can reach i (would create cycle)
+                if (!canReach(effective_deps, j, i)) {
+                    effective_deps[i][j] = true;
+                }
             }
         }
     }
@@ -55,6 +57,25 @@ fn oracleReady(statuses: [4]Status, deps: [4][4]bool) [4]bool {
         ready[i] = !blocked;
     }
     return ready;
+}
+
+// Check if 'from' can reach 'to' via transitive dependencies
+fn canReach(deps: [4][4]bool, from: usize, to: usize) bool {
+    var visited = [_]bool{false} ** 4;
+    return canReachDfs(deps, from, to, &visited);
+}
+
+fn canReachDfs(deps: [4][4]bool, current: usize, target: usize, visited: *[4]bool) bool {
+    if (current == target) return true;
+    if (visited[current]) return false;
+    visited[current] = true;
+
+    for (0..4) |j| {
+        if (deps[current][j] and canReachDfs(deps, j, target, visited)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 fn oracleListCount(statuses: [6]Status, filter: Status) usize {

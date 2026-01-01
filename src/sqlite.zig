@@ -235,6 +235,7 @@ pub const Storage = struct {
     list_stmt: Statement,
     add_dep_stmt: Statement,
     get_dep_type_stmt: Statement,
+    check_cycle_stmt: Statement,
     mark_dirty_stmt: Statement,
     clear_dirty_stmt: Statement,
     get_dirty_stmt: Statement,
@@ -298,6 +299,18 @@ pub const Storage = struct {
             "SELECT type FROM dependencies WHERE issue_id = ?1 AND depends_on_id = ?2",
         );
         errdefer get_dep_type_stmt.finalize();
+
+        // Check if target can reach source (would create cycle)
+        var check_cycle_stmt = try db.prepare(
+            \\WITH RECURSIVE reachable(id) AS (
+            \\  SELECT ?1
+            \\  UNION
+            \\  SELECT d.depends_on_id FROM dependencies d
+            \\  JOIN reachable r ON d.issue_id = r.id
+            \\)
+            \\SELECT 1 FROM reachable WHERE id = ?2 LIMIT 1
+        );
+        errdefer check_cycle_stmt.finalize();
 
         var mark_dirty_stmt = try db.prepare(
             "INSERT OR REPLACE INTO dirty_issues (issue_id, marked_at) VALUES (?1, ?2)",
@@ -384,6 +397,7 @@ pub const Storage = struct {
             .list_stmt = list_stmt,
             .add_dep_stmt = add_dep_stmt,
             .get_dep_type_stmt = get_dep_type_stmt,
+            .check_cycle_stmt = check_cycle_stmt,
             .mark_dirty_stmt = mark_dirty_stmt,
             .clear_dirty_stmt = clear_dirty_stmt,
             .get_dirty_stmt = get_dirty_stmt,
@@ -405,6 +419,7 @@ pub const Storage = struct {
         self.list_stmt.finalize();
         self.add_dep_stmt.finalize();
         self.get_dep_type_stmt.finalize();
+        self.check_cycle_stmt.finalize();
         self.mark_dirty_stmt.finalize();
         self.clear_dirty_stmt.finalize();
         self.get_dirty_stmt.finalize();
@@ -598,11 +613,11 @@ pub const Storage = struct {
     }
 
     pub fn addDependency(self: *Self, issue_id: []const u8, depends_on_id: []const u8, dep_type: []const u8, created_at: []const u8) !void {
-        // Check for direct cycle: if depends_on already depends on issue_id
-        self.get_dep_type_stmt.reset();
-        try self.get_dep_type_stmt.bindText(1, depends_on_id);
-        try self.get_dep_type_stmt.bindText(2, issue_id);
-        if (try self.get_dep_type_stmt.step()) {
+        // Check for transitive cycle: if depends_on can reach issue_id
+        self.check_cycle_stmt.reset();
+        try self.check_cycle_stmt.bindText(1, depends_on_id);
+        try self.check_cycle_stmt.bindText(2, issue_id);
+        if (try self.check_cycle_stmt.step()) {
             return error.DependencyCycle;
         }
 
