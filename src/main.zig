@@ -686,6 +686,12 @@ fn hookSync(allocator: Allocator) !void {
     defer parsed_input.deinit();
     const todos = parsed_input.value.todos;
 
+    // Validate all todos before any DB operations
+    for (todos) |todo| {
+        if (todo.content.len == 0) return error.InvalidHookInput;
+        if (!validateHookStatus(todo.status)) return error.InvalidHookInput;
+    }
+
     // Ensure .beads exists
     fs.cwd().makeDir(BEADS_DIR) catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -706,22 +712,28 @@ fn hookSync(allocator: Allocator) !void {
     var ts_buf: [40]u8 = undefined;
     const now = try formatTimestamp(&ts_buf);
 
+    // Begin transaction for atomicity
+    try storage.db.exec("BEGIN TRANSACTION");
+    errdefer storage.db.exec("ROLLBACK") catch {};
+
     // Process todos
     for (todos) |todo| {
         const content = todo.content;
         const status = todo.status;
-        if (content.len == 0) return error.InvalidHookInput;
-        if (!validateHookStatus(status)) return error.InvalidHookInput;
 
         if (std.mem.eql(u8, status, "completed")) {
             // Mark as done if we have mapping - only remove on success
             const dot_id = mapping.map.get(content) orelse return error.MissingTodoMapping;
-            try storage.updateStatus(dot_id, "closed", now, now, "Completed via TodoWrite");
+            try storage.updateStatusNoTransaction(dot_id, "closed", now, now, "Completed via TodoWrite");
             if (mapping.map.fetchOrderedRemove(content)) |kv| {
                 allocator.free(kv.key);
                 allocator.free(kv.value);
             }
-        } else if (mapping.map.get(content) == null) {
+        } else if (mapping.map.get(content)) |dot_id| {
+            // Update status if changed (pending <-> in_progress)
+            const new_db_status: []const u8 = if (std.mem.eql(u8, status, "in_progress")) "active" else "open";
+            try storage.updateStatusNoTransaction(dot_id, new_db_status, now, null, null);
+        } else {
             // Create new dot
             const id = try generateId(allocator, prefix);
             defer allocator.free(id);
@@ -744,7 +756,7 @@ fn hookSync(allocator: Allocator) !void {
                 .parent = null,
             };
 
-            try storage.createIssue(issue);
+            try storage.createIssueNoTransaction(issue);
 
             // Save mapping
             const key = try allocator.dupe(u8, content);
@@ -760,8 +772,11 @@ fn hookSync(allocator: Allocator) !void {
         }
     }
 
-    // Save mapping
-    try saveMapping(allocator, mapping);
+    // Save mapping atomically before committing DB
+    try saveMappingAtomic(allocator, mapping);
+
+    // Commit transaction
+    try storage.db.exec("COMMIT");
 }
 
 fn loadMapping(allocator: Allocator) !Mapping {
@@ -812,4 +827,22 @@ fn saveMapping(allocator: Allocator, map: Mapping) !void {
 
     try file.writeAll(json);
     try file.sync();
+}
+
+fn saveMappingAtomic(allocator: Allocator, map: Mapping) !void {
+    const tmp_file = MAPPING_FILE ++ ".tmp";
+
+    // Write to temp file
+    const file = try fs.cwd().createFile(tmp_file, .{});
+    errdefer fs.cwd().deleteFile(tmp_file) catch {};
+
+    const json = try std.json.Stringify.valueAlloc(allocator, map, .{});
+    defer allocator.free(json);
+
+    try file.writeAll(json);
+    try file.sync();
+    file.close();
+
+    // Atomic rename
+    try fs.cwd().rename(tmp_file, MAPPING_FILE);
 }

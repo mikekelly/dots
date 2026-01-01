@@ -420,15 +420,16 @@ pub const Storage = struct {
 
     pub fn createIssue(self: *Self, issue: Issue) !void {
         try self.db.exec("BEGIN TRANSACTION");
-        createIssueTransaction(self, issue) catch |err| {
+        self.createIssueNoTransaction(issue) catch |err| {
             self.db.exec("ROLLBACK") catch |rollback_err| {
                 std.debug.print("rollback failed: {}\n", .{rollback_err});
             };
             return err;
         };
+        try self.db.exec("COMMIT");
     }
 
-    fn createIssueTransaction(self: *Self, issue: Issue) !void {
+    pub fn createIssueNoTransaction(self: *Self, issue: Issue) !void {
         self.insert_stmt.reset();
         try self.insert_stmt.bindText(1, issue.id);
         try self.insert_stmt.bindText(2, issue.title);
@@ -449,10 +450,18 @@ pub const Storage = struct {
         }
 
         try self.markDirty(issue.id, issue.created_at);
-        try self.db.exec("COMMIT");
     }
 
     pub fn updateStatus(self: *Self, id: []const u8, status: []const u8, updated_at: []const u8, closed_at: ?[]const u8, reason: ?[]const u8) !void {
+        try self.db.exec("BEGIN TRANSACTION");
+        self.updateStatusNoTransaction(id, status, updated_at, closed_at, reason) catch |err| {
+            self.db.exec("ROLLBACK") catch {};
+            return err;
+        };
+        try self.db.exec("COMMIT");
+    }
+
+    pub fn updateStatusNoTransaction(self: *Self, id: []const u8, status: []const u8, updated_at: []const u8, closed_at: ?[]const u8, reason: ?[]const u8) !void {
         if (!try self.issueExists(id)) return error.IssueNotFound;
 
         self.update_status_stmt.reset();
