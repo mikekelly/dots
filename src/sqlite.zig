@@ -613,6 +613,9 @@ pub const Storage = struct {
     }
 
     pub fn addDependency(self: *Self, issue_id: []const u8, depends_on_id: []const u8, dep_type: []const u8, created_at: []const u8) !void {
+        // Validate both issues exist
+        if (!try self.issueExists(depends_on_id)) return error.DependencyNotFound;
+
         // Check for transitive cycle: if depends_on can reach issue_id
         self.check_cycle_stmt.reset();
         try self.check_cycle_stmt.bindText(1, depends_on_id);
@@ -750,10 +753,6 @@ pub fn hydrateFromJsonl(storage: *Storage, allocator: Allocator, jsonl_path: []c
     const content = try file.readToEndAlloc(allocator, max_jsonl_bytes);
     defer allocator.free(content);
 
-    var count: usize = 0;
-    var line_iter = std.mem.splitScalar(u8, content, '\n');
-    var line_no: usize = 0;
-
     const JsonlDependency = struct {
         depends_on_id: []const u8,
         type: ?[]const u8 = null,
@@ -773,6 +772,14 @@ pub fn hydrateFromJsonl(storage: *Storage, allocator: Allocator, jsonl_path: []c
         close_reason: ?[]const u8 = null,
         dependencies: ?[]const JsonlDependency = null,
     };
+
+    // Wrap entire hydration in transaction for atomicity
+    try storage.db.exec("BEGIN TRANSACTION");
+    errdefer storage.db.exec("ROLLBACK") catch {};
+
+    var count: usize = 0;
+    var line_iter = std.mem.splitScalar(u8, content, '\n');
+    var line_no: usize = 0;
 
     while (line_iter.next()) |line| : (line_no += 1) {
         if (line.len == 0) continue;
@@ -818,13 +825,13 @@ pub fn hydrateFromJsonl(storage: *Storage, allocator: Allocator, jsonl_path: []c
             .parent = null,
         };
 
-        try storage.createIssue(issue);
+        try storage.createIssueNoTransaction(issue);
 
         if (obj.dependencies) |deps| {
             for (deps) |dep| {
                 const dep_type = dep.type orelse "blocks";
                 storage.addDependency(id, dep.depends_on_id, dep_type, created_at) catch |err| switch (err) {
-                    error.DependencyConflict => {
+                    error.DependencyConflict, error.DependencyNotFound => {
                         std.debug.print(
                             "Invalid dependency at {s}:{d} for {s} -> {s}\n",
                             .{ jsonl_path, line_no + 1, id, dep.depends_on_id },
@@ -839,5 +846,6 @@ pub fn hydrateFromJsonl(storage: *Storage, allocator: Allocator, jsonl_path: []c
         count += 1;
     }
 
+    try storage.db.exec("COMMIT");
     return count;
 }
