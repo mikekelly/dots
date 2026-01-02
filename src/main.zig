@@ -688,13 +688,13 @@ fn hookSync(allocator: Allocator) !void {
     defer allocator.free(input);
     if (input.len == 0) return error.EmptyHookInput;
 
-    // Parse JSON
+    // Parse JSON (ignore_unknown_fields for forward compatibility with Claude Code)
     const parsed = try parseJsonSliceOrError(
         HookEnvelope,
         allocator,
         input,
         error.InvalidHookInput,
-        .{ .ignore_unknown_fields = false },
+        .{ .ignore_unknown_fields = true },
     );
     defer parsed.deinit();
 
@@ -706,7 +706,7 @@ fn hookSync(allocator: Allocator) !void {
         allocator,
         tool_input,
         error.InvalidHookInput,
-        .{ .ignore_unknown_fields = false },
+        .{ .ignore_unknown_fields = true },
     );
     defer parsed_input.deinit();
     const todos = parsed_input.value.todos;

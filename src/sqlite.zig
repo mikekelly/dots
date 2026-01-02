@@ -333,7 +333,7 @@ pub const Storage = struct {
             \\    JOIN issues blocker ON d.depends_on_id = blocker.id
             \\    WHERE d.issue_id = i.id
             \\      AND d.type = 'blocks'
-            \\      AND blocker.status IN ('open', 'active', 'in_progress')
+            \\      AND blocker.status IN ('open', 'active')
             \\  )
             \\ORDER BY i.priority, i.created_at
         );
@@ -347,7 +347,7 @@ pub const Storage = struct {
             \\         JOIN issues blocker ON d2.depends_on_id = blocker.id
             \\         WHERE d2.issue_id = i.id
             \\           AND d2.type = 'blocks'
-            \\           AND blocker.status IN ('open', 'active', 'in_progress')
+            \\           AND blocker.status IN ('open', 'active')
             \\       ) AS is_blocked
             \\FROM issues i
             \\JOIN dependencies d ON i.id = d.issue_id
@@ -480,6 +480,11 @@ pub const Storage = struct {
 
     pub fn updateStatusNoTransaction(self: *Self, id: []const u8, status: []const u8, updated_at: []const u8, closed_at: ?[]const u8, reason: ?[]const u8) !void {
         if (!try self.issueExists(id)) return error.IssueNotFound;
+
+        // Invariant: closed status requires closed_at timestamp
+        if (std.mem.eql(u8, status, "closed") and closed_at == null) {
+            return error.InvalidStatus;
+        }
 
         self.update_status_stmt.reset();
         try self.update_status_stmt.bindText(1, id);
@@ -615,6 +620,7 @@ pub const Storage = struct {
 
     pub fn addDependency(self: *Self, issue_id: []const u8, depends_on_id: []const u8, dep_type: []const u8, created_at: []const u8) !void {
         // Validate both issues exist
+        if (!try self.issueExists(issue_id)) return error.IssueNotFound;
         if (!try self.issueExists(depends_on_id)) return error.DependencyNotFound;
 
         // Check for transitive cycle: if depends_on can reach issue_id
