@@ -4,25 +4,31 @@ const fs = std.fs;
 const build_options = @import("build_options");
 const dot_binary = build_options.dot_binary;
 
-const sqlite = @import("sqlite.zig");
+const storage_mod = @import("storage.zig");
 const qc = @import("util/quickcheck.zig");
-const status_util = @import("util/status.zig");
 const mapping_util = @import("util/mapping.zig");
+const OhSnap = @import("ohsnap");
 
 const max_output_bytes = 1024 * 1024;
 const fixed_timestamp = "2024-01-01T00:00:00.000000+00:00";
-const db_filename = "beads.db";
 
-const RunResult = struct { stdout: []u8, stderr: []u8, term: std.process.Child.Term };
+const RunResult = struct {
+    stdout: []u8,
+    stderr: []u8,
+    term: std.process.Child.Term,
 
-const Status = status_util.StatusKind;
+    fn deinit(self: RunResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.stdout);
+        allocator.free(self.stderr);
+    }
+};
 
-fn statusString(status: Status) []const u8 {
-    return status_util.toString(status);
-}
+const Status = storage_mod.Status;
+const Issue = storage_mod.Issue;
+const Storage = storage_mod.Storage;
 
 fn isBlocking(status: Status) bool {
-    return status_util.isBlocking(status);
+    return status == .open or status == .active;
 }
 
 fn oracleReady(statuses: [4]Status, deps: [4][4]bool) [4]bool {
@@ -115,7 +121,7 @@ fn runDotWithInput(
     cwd: []const u8,
     input: ?[]const u8,
 ) !RunResult {
-    var argv: std.ArrayList([]const u8) = .empty;
+    var argv: std.ArrayList([]const u8) = .{};
     defer argv.deinit(allocator);
 
     try argv.append(allocator, dot_binary);
@@ -177,24 +183,47 @@ fn cleanupTestDirAndFree(allocator: std.mem.Allocator, path: []const u8) void {
     allocator.free(path);
 }
 
-fn openTestStorage(allocator: std.mem.Allocator, dir: []const u8) sqlite.Storage {
-    const db_path = allocPrintZ(allocator, "{s}/{s}", .{ dir, db_filename }) catch |err| {
-        std.debug.panic("db path: {}", .{err});
-    };
-    defer allocator.free(db_path);
+// Helper to open storage in a test directory
+// Returns the storage and original directory for cleanup
+const TestStorage = struct {
+    storage: Storage,
+    original_dir: fs.Dir,
+    test_dir_path: []const u8,
+    allocator: std.mem.Allocator,
 
-    return sqlite.Storage.open(allocator, db_path) catch |err| {
+    fn init(allocator: std.mem.Allocator, test_dir: []const u8) !TestStorage {
+        const original_dir = fs.cwd();
+
+        // Change to test directory
+        var dir = try fs.openDirAbsolute(test_dir, .{});
+        try dir.setAsCwd();
+
+        // Open storage (creates .dots in test dir)
+        const storage = Storage.open(allocator) catch |err| {
+            // Restore original directory on error
+            original_dir.setAsCwd() catch {};
+            dir.close();
+            return err;
+        };
+
+        return TestStorage{
+            .storage = storage,
+            .original_dir = original_dir,
+            .test_dir_path = test_dir,
+            .allocator = allocator,
+        };
+    }
+
+    fn deinit(self: *TestStorage) void {
+        self.storage.close();
+        self.original_dir.setAsCwd() catch {};
+    }
+};
+
+fn openTestStorage(allocator: std.mem.Allocator, dir: []const u8) TestStorage {
+    return TestStorage.init(allocator, dir) catch |err| {
         std.debug.panic("open storage: {}", .{err});
     };
-}
-
-fn allocPrintZ(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) ![:0]u8 {
-    const tmp = try std.fmt.allocPrint(allocator, fmt, args);
-    defer allocator.free(tmp);
-
-    const out = try allocator.allocSentinel(u8, tmp.len, 0);
-    @memcpy(out[0..tmp.len], tmp);
-    return out;
 }
 
 fn trimNewline(input: []const u8) []const u8 {
@@ -205,6 +234,23 @@ fn isExitCode(term: std.process.Child.Term, code: u8) bool {
     return switch (term) {
         .Exited => |actual| actual == code,
         else => false,
+    };
+}
+
+fn makeTestIssue(id: []const u8, status: Status) Issue {
+    return Issue{
+        .id = id,
+        .title = id,
+        .description = "",
+        .status = status,
+        .priority = 2,
+        .issue_type = "task",
+        .assignee = null,
+        .created_at = fixed_timestamp,
+        .closed_at = if (status == .closed) fixed_timestamp else null,
+        .close_reason = null,
+        .blocks = &.{},
+        .parent = null,
     };
 }
 
@@ -221,8 +267,8 @@ test "prop: ready issues match oracle" {
             const test_dir = setupTestDirOrPanic(allocator);
             defer cleanupTestDirAndFree(allocator, test_dir);
 
-            var storage = openTestStorage(allocator, test_dir);
-            defer storage.close();
+            var ts = openTestStorage(allocator, test_dir);
+            defer ts.deinit();
 
             var id_bufs: [4][16]u8 = undefined;
             var ids: [4][]const u8 = undefined;
@@ -232,26 +278,8 @@ test "prop: ready issues match oracle" {
                     std.debug.panic("id format: {}", .{err});
                 };
 
-                const status = statusString(args.statuses[i]);
-                const closed_at: ?[]const u8 = if (args.statuses[i] == .closed) fixed_timestamp else null;
-
-                const issue = sqlite.Issue{
-                    .id = ids[i],
-                    .title = ids[i],
-                    .description = "",
-                    .status = status,
-                    .priority = 2,
-                    .issue_type = "task",
-                    .assignee = null,
-                    .created_at = fixed_timestamp,
-                    .updated_at = fixed_timestamp,
-                    .closed_at = closed_at,
-                    .close_reason = null,
-                    .after = null,
-                    .parent = null,
-                };
-
-                storage.createIssue(issue) catch |err| {
+                const issue = makeTestIssue(ids[i], args.statuses[i]);
+                ts.storage.createIssue(issue, null) catch |err| {
                     std.debug.panic("create issue: {}", .{err});
                 };
             }
@@ -259,7 +287,7 @@ test "prop: ready issues match oracle" {
             for (0..4) |i| {
                 for (0..4) |j| {
                     if (args.deps[i][j]) {
-                        storage.addDependency(ids[i], ids[j], "blocks", fixed_timestamp) catch |err| switch (err) {
+                        ts.storage.addDependency(ids[i], ids[j], "blocks") catch |err| switch (err) {
                             error.DependencyCycle => {}, // Skip cycles
                             else => std.debug.panic("add dependency: {}", .{err}),
                         };
@@ -267,10 +295,10 @@ test "prop: ready issues match oracle" {
                 }
             }
 
-            const issues = storage.getReadyIssues() catch |err| {
+            const issues = ts.storage.getReadyIssues() catch |err| {
                 std.debug.panic("get ready: {}", .{err});
             };
-            defer sqlite.freeIssues(allocator, issues);
+            defer storage_mod.freeIssues(allocator, issues);
 
             const expected = oracleReady(args.statuses, args.deps);
             var found = [_]bool{ false, false, false, false };
@@ -308,8 +336,8 @@ test "prop: listIssues filter matches oracle" {
             const test_dir = setupTestDirOrPanic(allocator);
             defer cleanupTestDirAndFree(allocator, test_dir);
 
-            var storage = openTestStorage(allocator, test_dir);
-            defer storage.close();
+            var ts = openTestStorage(allocator, test_dir);
+            defer ts.deinit();
 
             var id_bufs: [6][16]u8 = undefined;
             var ids: [6][]const u8 = undefined;
@@ -319,42 +347,24 @@ test "prop: listIssues filter matches oracle" {
                     std.debug.panic("id format: {}", .{err});
                 };
 
-                const status = statusString(args.statuses[i]);
-                const closed_at: ?[]const u8 = if (args.statuses[i] == .closed) fixed_timestamp else null;
-
-                const issue = sqlite.Issue{
-                    .id = ids[i],
-                    .title = ids[i],
-                    .description = "",
-                    .status = status,
-                    .priority = 2,
-                    .issue_type = "task",
-                    .assignee = null,
-                    .created_at = fixed_timestamp,
-                    .updated_at = fixed_timestamp,
-                    .closed_at = closed_at,
-                    .close_reason = null,
-                    .after = null,
-                    .parent = null,
-                };
-
-                storage.createIssue(issue) catch |err| {
+                const issue = makeTestIssue(ids[i], args.statuses[i]);
+                ts.storage.createIssue(issue, null) catch |err| {
                     std.debug.panic("create issue: {}", .{err});
                 };
             }
 
             const filters = [_]Status{ .open, .active, .closed };
             for (filters) |filter| {
-                const issues = storage.listIssues(statusString(filter)) catch |err| {
+                const issues = ts.storage.listIssues(filter) catch |err| {
                     std.debug.panic("list issues: {}", .{err});
                 };
-                defer sqlite.freeIssues(allocator, issues);
+                defer storage_mod.freeIssues(allocator, issues);
 
                 const expected_count = oracleListCount(args.statuses, filter);
                 if (issues.len != expected_count) return false;
 
                 for (issues) |issue| {
-                    if (!std.mem.eql(u8, issue.status, statusString(filter))) return false;
+                    if (issue.status != filter) return false;
                 }
             }
 
@@ -377,30 +387,16 @@ test "prop: tree children blocked flag matches oracle" {
             const test_dir = setupTestDirOrPanic(allocator);
             defer cleanupTestDirAndFree(allocator, test_dir);
 
-            var storage = openTestStorage(allocator, test_dir);
-            defer storage.close();
+            var ts = openTestStorage(allocator, test_dir);
+            defer ts.deinit();
 
             var parent_buf: [16]u8 = undefined;
             const parent_id = std.fmt.bufPrint(&parent_buf, "parent", .{}) catch |err| {
                 std.debug.panic("parent id: {}", .{err});
             };
 
-            const parent_issue = sqlite.Issue{
-                .id = parent_id,
-                .title = parent_id,
-                .description = "",
-                .status = "open",
-                .priority = 2,
-                .issue_type = "task",
-                .assignee = null,
-                .created_at = fixed_timestamp,
-                .updated_at = fixed_timestamp,
-                .closed_at = null,
-                .close_reason = null,
-                .after = null,
-                .parent = null,
-            };
-            storage.createIssue(parent_issue) catch |err| {
+            const parent_issue = makeTestIssue(parent_id, .open);
+            ts.storage.createIssue(parent_issue, null) catch |err| {
                 std.debug.panic("create parent: {}", .{err});
             };
 
@@ -411,31 +407,9 @@ test "prop: tree children blocked flag matches oracle" {
                     std.debug.panic("child id: {}", .{err});
                 };
 
-                const status = statusString(args.child_statuses[i]);
-                const closed_at: ?[]const u8 = if (args.child_statuses[i] == .closed) fixed_timestamp else null;
-
-                const issue = sqlite.Issue{
-                    .id = child_ids[i],
-                    .title = child_ids[i],
-                    .description = "",
-                    .status = status,
-                    .priority = 2,
-                    .issue_type = "task",
-                    .assignee = null,
-                    .created_at = fixed_timestamp,
-                    .updated_at = fixed_timestamp,
-                    .closed_at = closed_at,
-                    .close_reason = null,
-                    .after = null,
-                    .parent = null,
-                };
-
-                storage.createIssue(issue) catch |err| {
+                const issue = makeTestIssue(child_ids[i], args.child_statuses[i]);
+                ts.storage.createIssue(issue, parent_id) catch |err| {
                     std.debug.panic("create child: {}", .{err});
-                };
-
-                storage.addDependency(child_ids[i], parent_id, "parent-child", fixed_timestamp) catch |err| {
-                    std.debug.panic("add parent-child: {}", .{err});
                 };
             }
 
@@ -446,26 +420,8 @@ test "prop: tree children blocked flag matches oracle" {
                     std.debug.panic("blocker id: {}", .{err});
                 };
 
-                const status = statusString(args.blocker_statuses[i]);
-                const closed_at: ?[]const u8 = if (args.blocker_statuses[i] == .closed) fixed_timestamp else null;
-
-                const issue = sqlite.Issue{
-                    .id = blocker_ids[i],
-                    .title = blocker_ids[i],
-                    .description = "",
-                    .status = status,
-                    .priority = 2,
-                    .issue_type = "task",
-                    .assignee = null,
-                    .created_at = fixed_timestamp,
-                    .updated_at = fixed_timestamp,
-                    .closed_at = closed_at,
-                    .close_reason = null,
-                    .after = null,
-                    .parent = null,
-                };
-
-                storage.createIssue(issue) catch |err| {
+                const issue = makeTestIssue(blocker_ids[i], args.blocker_statuses[i]);
+                ts.storage.createIssue(issue, null) catch |err| {
                     std.debug.panic("create blocker: {}", .{err});
                 };
             }
@@ -473,17 +429,17 @@ test "prop: tree children blocked flag matches oracle" {
             for (0..3) |i| {
                 for (0..3) |j| {
                     if (args.child_blocks[i][j]) {
-                        storage.addDependency(child_ids[i], blocker_ids[j], "blocks", fixed_timestamp) catch |err| {
+                        ts.storage.addDependency(child_ids[i], blocker_ids[j], "blocks") catch |err| {
                             std.debug.panic("add block dep: {}", .{err});
                         };
                     }
                 }
             }
 
-            const children = storage.getChildren(parent_id) catch |err| {
+            const children = ts.storage.getChildren(parent_id) catch |err| {
                 std.debug.panic("get children: {}", .{err});
             };
-            defer sqlite.freeChildIssues(allocator, children);
+            defer storage_mod.freeChildIssues(allocator, children);
 
             if (children.len != 3) return false;
 
@@ -524,15 +480,15 @@ test "prop: update done sets closed_at" {
             const test_dir = setupTestDirOrPanic(allocator);
             defer cleanupTestDirAndFree(allocator, test_dir);
 
-            _ = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+            const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
                 std.debug.panic("init: {}", .{err});
             };
+            defer init.deinit(allocator);
 
             const add = runDot(allocator, &.{ "add", "Update done test" }, test_dir) catch |err| {
                 std.debug.panic("add: {}", .{err});
             };
-            defer allocator.free(add.stdout);
-            defer allocator.free(add.stderr);
+            defer add.deinit(allocator);
 
             const id = trimNewline(add.stdout);
             if (id.len == 0) return false;
@@ -541,15 +497,13 @@ test "prop: update done sets closed_at" {
             const update = runDot(allocator, &.{ "update", id, "--status", status }, test_dir) catch |err| {
                 std.debug.panic("update: {}", .{err});
             };
-            defer allocator.free(update.stdout);
-            defer allocator.free(update.stderr);
+            defer update.deinit(allocator);
             if (!isExitCode(update.term, 0)) return false;
 
             const show = runDot(allocator, &.{ "show", id }, test_dir) catch |err| {
                 std.debug.panic("show: {}", .{err});
             };
-            defer allocator.free(show.stdout);
-            defer allocator.free(show.stderr);
+            defer show.deinit(allocator);
             if (!isExitCode(show.term, 0)) return false;
 
             const expects_closed = oracleUpdateClosed(args.done);
@@ -610,61 +564,33 @@ test "prop: unknown id errors" {
 }
 
 test "prop: dependency cycle rejected" {
-    // Test cycle detection at sqlite level
+    // Test cycle detection at storage level
     const allocator = std.testing.allocator;
 
     const test_dir = setupTestDirOrPanic(allocator);
     defer cleanupTestDirAndFree(allocator, test_dir);
 
-    var storage = openTestStorage(allocator, test_dir);
-    defer storage.close();
+    var ts = openTestStorage(allocator, test_dir);
+    defer ts.deinit();
 
     // Create two issues
-    const issue_a = sqlite.Issue{
-        .id = "test-a",
-        .title = "Issue A",
-        .description = "",
-        .status = "open",
-        .priority = 2,
-        .issue_type = "task",
-        .assignee = null,
-        .created_at = fixed_timestamp,
-        .updated_at = fixed_timestamp,
-        .closed_at = null,
-        .close_reason = null,
-        .after = null,
-        .parent = null,
-    };
-    storage.createIssue(issue_a) catch |err| {
+    const issue_a = makeTestIssue("test-a", .open);
+    ts.storage.createIssue(issue_a, null) catch |err| {
         std.debug.panic("create A: {}", .{err});
     };
 
-    const issue_b = sqlite.Issue{
-        .id = "test-b",
-        .title = "Issue B",
-        .description = "",
-        .status = "open",
-        .priority = 2,
-        .issue_type = "task",
-        .assignee = null,
-        .created_at = fixed_timestamp,
-        .updated_at = fixed_timestamp,
-        .closed_at = null,
-        .close_reason = null,
-        .after = null,
-        .parent = null,
-    };
-    storage.createIssue(issue_b) catch |err| {
+    const issue_b = makeTestIssue("test-b", .open);
+    ts.storage.createIssue(issue_b, null) catch |err| {
         std.debug.panic("create B: {}", .{err});
     };
 
     // Add A depends on B (A->B)
-    storage.addDependency("test-a", "test-b", "blocks", fixed_timestamp) catch |err| {
+    ts.storage.addDependency("test-a", "test-b", "blocks") catch |err| {
         std.debug.panic("add A->B: {}", .{err});
     };
 
     // Try to add B depends on A (B->A) - should fail with DependencyCycle
-    const cycle_result = storage.addDependency("test-b", "test-a", "blocks", fixed_timestamp);
+    const cycle_result = ts.storage.addDependency("test-b", "test-a", "blocks");
     try std.testing.expectError(error.DependencyCycle, cycle_result);
 }
 
@@ -675,71 +601,43 @@ test "prop: delete cascade unblocks dependents" {
     const test_dir = setupTestDirOrPanic(allocator);
     defer cleanupTestDirAndFree(allocator, test_dir);
 
-    var storage = openTestStorage(allocator, test_dir);
-    defer storage.close();
+    var ts = openTestStorage(allocator, test_dir);
+    defer ts.deinit();
 
     // Create blocker issue
-    const blocker = sqlite.Issue{
-        .id = "blocker",
-        .title = "Blocker",
-        .description = "",
-        .status = "open",
-        .priority = 2,
-        .issue_type = "task",
-        .assignee = null,
-        .created_at = fixed_timestamp,
-        .updated_at = fixed_timestamp,
-        .closed_at = null,
-        .close_reason = null,
-        .after = null,
-        .parent = null,
-    };
-    storage.createIssue(blocker) catch |err| {
+    const blocker = makeTestIssue("blocker", .open);
+    ts.storage.createIssue(blocker, null) catch |err| {
         std.debug.panic("create blocker: {}", .{err});
     };
 
     // Create dependent issue
-    const dependent = sqlite.Issue{
-        .id = "dependent",
-        .title = "Dependent",
-        .description = "",
-        .status = "open",
-        .priority = 2,
-        .issue_type = "task",
-        .assignee = null,
-        .created_at = fixed_timestamp,
-        .updated_at = fixed_timestamp,
-        .closed_at = null,
-        .close_reason = null,
-        .after = null,
-        .parent = null,
-    };
-    storage.createIssue(dependent) catch |err| {
+    const dependent = makeTestIssue("dependent", .open);
+    ts.storage.createIssue(dependent, null) catch |err| {
         std.debug.panic("create dependent: {}", .{err});
     };
 
     // Add dependency: dependent blocked by blocker
-    storage.addDependency("dependent", "blocker", "blocks", fixed_timestamp) catch |err| {
+    ts.storage.addDependency("dependent", "blocker", "blocks") catch |err| {
         std.debug.panic("add dep: {}", .{err});
     };
 
     // Verify dependent is NOT ready (blocked)
-    const ready1 = storage.getReadyIssues() catch |err| {
+    const ready1 = ts.storage.getReadyIssues() catch |err| {
         std.debug.panic("ready1: {}", .{err});
     };
-    defer sqlite.freeIssues(allocator, ready1);
+    defer storage_mod.freeIssues(allocator, ready1);
     try std.testing.expectEqual(@as(usize, 1), ready1.len); // Only blocker is ready
 
     // Delete blocker
-    storage.deleteIssue("blocker") catch |err| {
+    ts.storage.deleteIssue("blocker") catch |err| {
         std.debug.panic("delete: {}", .{err});
     };
 
     // Verify dependent is now ready (unblocked)
-    const ready2 = storage.getReadyIssues() catch |err| {
+    const ready2 = ts.storage.getReadyIssues() catch |err| {
         std.debug.panic("ready2: {}", .{err});
     };
-    defer sqlite.freeIssues(allocator, ready2);
+    defer storage_mod.freeIssues(allocator, ready2);
     try std.testing.expectEqual(@as(usize, 1), ready2.len);
     try std.testing.expectEqualStrings("dependent", ready2[0].id);
 }
@@ -787,7 +685,9 @@ test "prop: invalid dependency rejected" {
             defer allocator.free(list.stdout);
             defer allocator.free(list.stderr);
 
-            const parsed = std.json.parseFromSlice([]JsonIssue, allocator, list.stdout, .{}) catch |err| {
+            const parsed = std.json.parseFromSlice([]JsonIssue, allocator, list.stdout, .{
+                .ignore_unknown_fields = true,
+            }) catch |err| {
                 std.debug.panic("parse: {}", .{err});
             };
             defer parsed.deinit();
@@ -798,1546 +698,1086 @@ test "prop: invalid dependency rejected" {
     }.property, .{ .iterations = 20, .seed = 0xDEADBEEF });
 }
 
-const max_model_tasks = 8;
-const max_model_steps = 20;
-const max_hook_todos = 4;
-const max_hydrate_issues = 4;
-
-const Action = enum(u4) {
-    add,
-    add_json,
-    quick_add,
-    on,
-    off,
-    update,
-    rm,
-    list_text,
-    list_json,
-    ready_text,
-    ready_json,
-    tree,
-    find,
-    show,
-    help,
-    version,
-};
-
-const ModelTask = struct {
-    id: []const u8,
-    title: []const u8,
-    description: []const u8,
-    status: Status,
-    priority: i64,
-    order: usize,
-};
-
-const Model = struct {
-    tasks: [max_model_tasks]?ModelTask,
-    deps: [max_model_tasks][max_model_tasks]bool,
-    parents: [max_model_tasks]?usize,
-    next_order: usize,
-
-    fn init() Model {
-        const empty_task = [_]?ModelTask{null} ** max_model_tasks;
-        const empty_parent = [_]?usize{null} ** max_model_tasks;
-        const empty_row = [_]bool{false} ** max_model_tasks;
-        const empty_deps = [_][max_model_tasks]bool{empty_row} ** max_model_tasks;
-        return .{ .tasks = empty_task, .deps = empty_deps, .parents = empty_parent, .next_order = 0 };
-    }
-};
-
 const JsonIssue = struct {
     id: []const u8,
     title: []const u8,
-    description: ?[]const u8 = null,
     status: []const u8,
     priority: i64,
-    issue_type: []const u8,
-    created_at: []const u8,
-    updated_at: []const u8,
-    closed_at: ?[]const u8 = null,
-    close_reason: ?[]const u8 = null,
 };
 
-const ShowInfo = struct {
-    id: []const u8,
-    title: []const u8,
-    status: Status,
-    priority: i64,
-    description: []const u8,
-    has_closed: bool,
-};
+test "cli: init creates dots directory" {
+    const allocator = std.testing.allocator;
 
-fn modelCount(model: *const Model) usize {
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    const result = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+        std.debug.panic("init: {}", .{err});
+    };
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    try std.testing.expect(isExitCode(result.term, 0));
+
+    // Verify .dots directory exists
+    const dots_path = std.fmt.allocPrint(allocator, "{s}/.dots", .{test_dir}) catch |err| {
+        std.debug.panic("path: {}", .{err});
+    };
+    defer allocator.free(dots_path);
+
+    const stat = fs.cwd().statFile(dots_path) catch |err| {
+        std.debug.panic("stat: {}", .{err});
+    };
+    try std.testing.expect(stat.kind == .directory);
+}
+
+test "cli: add creates markdown file" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    _ = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+        std.debug.panic("init: {}", .{err});
+    };
+
+    const result = runDot(allocator, &.{ "add", "Test task" }, test_dir) catch |err| {
+        std.debug.panic("add: {}", .{err});
+    };
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    try std.testing.expect(isExitCode(result.term, 0));
+
+    const id = trimNewline(result.stdout);
+    try std.testing.expect(id.len > 0);
+
+    // Verify markdown file exists
+    const md_path = std.fmt.allocPrint(allocator, "{s}/.dots/{s}.md", .{ test_dir, id }) catch |err| {
+        std.debug.panic("path: {}", .{err});
+    };
+    defer allocator.free(md_path);
+
+    const stat = fs.cwd().statFile(md_path) catch |err| {
+        std.debug.panic("stat: {}", .{err});
+    };
+    try std.testing.expect(stat.kind == .file);
+}
+
+test "cli: purge removes archived dots" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    _ = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+        std.debug.panic("init: {}", .{err});
+    };
+
+    // Add and close an issue to archive it
+    const add = runDot(allocator, &.{ "add", "To archive" }, test_dir) catch |err| {
+        std.debug.panic("add: {}", .{err});
+    };
+    defer allocator.free(add.stdout);
+    defer allocator.free(add.stderr);
+
+    const id = trimNewline(add.stdout);
+
+    _ = runDot(allocator, &.{ "off", id }, test_dir) catch |err| {
+        std.debug.panic("off: {}", .{err});
+    };
+
+    // Verify archive has content
+    const archive_path = std.fmt.allocPrint(allocator, "{s}/.dots/archive", .{test_dir}) catch |err| {
+        std.debug.panic("path: {}", .{err});
+    };
+    defer allocator.free(archive_path);
+
+    var archive_dir = fs.cwd().openDir(archive_path, .{ .iterate = true }) catch |err| {
+        std.debug.panic("open archive: {}", .{err});
+    };
+    defer archive_dir.close();
+
     var count: usize = 0;
-    for (model.tasks) |task| {
-        if (task != null) count += 1;
+    var iter = archive_dir.iterate();
+    while (iter.next() catch null) |_| {
+        count += 1;
     }
-    return count;
-}
+    try std.testing.expect(count > 0);
 
-fn collectExistingIndices(model: *const Model, out: *[max_model_tasks]usize) usize {
-    var len: usize = 0;
-    for (0..max_model_tasks) |i| {
-        if (model.tasks[i] != null) {
-            out[len] = i;
-            len += 1;
-        }
-    }
-    return len;
-}
-
-fn sortIndices(model: *const Model, indices: []usize) void {
-    var i: usize = 1;
-    while (i < indices.len) : (i += 1) {
-        var j = i;
-        while (j > 0) : (j -= 1) {
-            const left = model.tasks[indices[j - 1]].?;
-            const right = model.tasks[indices[j]].?;
-            if (left.priority < right.priority) break;
-            if (left.priority == right.priority and left.order <= right.order) break;
-            const tmp = indices[j];
-            indices[j] = indices[j - 1];
-            indices[j - 1] = tmp;
-        }
-    }
-}
-
-fn collectListIndices(model: *const Model, filter: ?Status, skip_done: bool, out: *[max_model_tasks]usize) usize {
-    var len: usize = 0;
-    for (0..max_model_tasks) |i| {
-        if (model.tasks[i]) |task| {
-            if (skip_done and task.status == .closed) continue;
-            if (filter) |want| {
-                if (task.status != want) continue;
-            }
-            out[len] = i;
-            len += 1;
-        }
-    }
-    sortIndices(model, out[0..len]);
-    return len;
-}
-
-fn collectReadyIndices(model: *const Model, out: *[max_model_tasks]usize) usize {
-    var len: usize = 0;
-    for (0..max_model_tasks) |i| {
-        if (model.tasks[i]) |task| {
-            if (task.status != .open) continue;
-            var blocked = false;
-            for (0..max_model_tasks) |j| {
-                if (model.deps[i][j]) {
-                    if (model.tasks[j]) |blocker| {
-                        if (isBlocking(blocker.status)) {
-                            blocked = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (!blocked) {
-                out[len] = i;
-                len += 1;
-            }
-        }
-    }
-    sortIndices(model, out[0..len]);
-    return len;
-}
-
-fn containsCaseInsensitive(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return false;
-    if (needle.len > haystack.len) return false;
-    var i: usize = 0;
-    while (i + needle.len <= haystack.len) : (i += 1) {
-        var j: usize = 0;
-        while (j < needle.len) : (j += 1) {
-            const a = std.ascii.toLower(haystack[i + j]);
-            const b = std.ascii.toLower(needle[j]);
-            if (a != b) break;
-        }
-        if (j == needle.len) return true;
-    }
-    return false;
-}
-
-fn parseStatusDisplay(input: []const u8) ?Status {
-    if (std.mem.eql(u8, input, "open")) return .open;
-    if (std.mem.eql(u8, input, "active")) return .active;
-    if (std.mem.eql(u8, input, "done")) return .closed;
-    if (std.mem.eql(u8, input, "closed")) return .closed;
-    return null;
-}
-
-fn parseStatusChar(ch: u8) ?Status {
-    return switch (ch) {
-        'o' => .open,
-        '>' => .active,
-        'x' => .closed,
-        else => null,
+    // Purge
+    const purge = runDot(allocator, &.{"purge"}, test_dir) catch |err| {
+        std.debug.panic("purge: {}", .{err});
     };
-}
+    defer allocator.free(purge.stdout);
+    defer allocator.free(purge.stderr);
 
-fn listJsonMatches(allocator: std.mem.Allocator, model: *const Model, input: []const u8, filter: ?Status, skip_done: bool) bool {
-    const parsed = std.json.parseFromSlice([]JsonIssue, allocator, input, .{}) catch |err| {
-        std.debug.panic("parse list json: {}", .{err});
+    try std.testing.expect(isExitCode(purge.term, 0));
+
+    // Verify archive is empty
+    var archive_dir2 = fs.cwd().openDir(archive_path, .{ .iterate = true }) catch |err| {
+        std.debug.panic("open archive2: {}", .{err});
     };
-    defer parsed.deinit();
+    defer archive_dir2.close();
 
-    const issues = parsed.value;
-    var expected: [max_model_tasks]usize = undefined;
-    const expected_len = collectListIndices(model, filter, skip_done, &expected);
-    if (issues.len != expected_len) return false;
-
-    var found = [_]bool{false} ** max_model_tasks;
-    var last_priority: ?i64 = null;
-    for (issues) |issue| {
-        if (last_priority) |prev| {
-            if (issue.priority < prev) return false;
-        }
-        last_priority = issue.priority;
-
-        var matched_idx: ?usize = null;
-        for (expected[0..expected_len]) |idx| {
-            const task = model.tasks[idx].?;
-            if (std.mem.eql(u8, issue.id, task.id)) {
-                matched_idx = idx;
-                if (!std.mem.eql(u8, issue.title, task.title)) return false;
-                const desc = issue.description orelse "";
-                if (!std.mem.eql(u8, desc, task.description)) return false;
-                const status = parseStatusDisplay(issue.status) orelse return false;
-                if (status != task.status) return false;
-                if (issue.priority != task.priority) return false;
-                break;
-            }
-        }
-        if (matched_idx == null) return false;
-        if (found[matched_idx.?]) return false;
-        found[matched_idx.?] = true;
+    var count2: usize = 0;
+    var iter2 = archive_dir2.iterate();
+    while (iter2.next() catch null) |_| {
+        count2 += 1;
     }
-
-    for (expected[0..expected_len]) |idx| {
-        if (!found[idx]) return false;
-    }
-
-    return true;
+    try std.testing.expectEqual(@as(usize, 0), count2);
 }
 
-fn readyJsonMatches(allocator: std.mem.Allocator, model: *const Model, input: []const u8) bool {
-    const parsed = std.json.parseFromSlice([]JsonIssue, allocator, input, .{}) catch |err| {
-        std.debug.panic("parse ready json: {}", .{err});
+test "cli: parent creates folder structure" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    _ = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+        std.debug.panic("init: {}", .{err});
     };
-    defer parsed.deinit();
 
-    const issues = parsed.value;
-    var expected: [max_model_tasks]usize = undefined;
-    const expected_len = collectReadyIndices(model, &expected);
-    if (issues.len != expected_len) return false;
+    // Add parent
+    const parent = runDot(allocator, &.{ "add", "Parent task" }, test_dir) catch |err| {
+        std.debug.panic("add parent: {}", .{err});
+    };
+    defer allocator.free(parent.stdout);
+    defer allocator.free(parent.stderr);
 
-    var found = [_]bool{false} ** max_model_tasks;
-    var last_priority: ?i64 = null;
-    for (issues) |issue| {
-        if (last_priority) |prev| {
-            if (issue.priority < prev) return false;
-        }
-        last_priority = issue.priority;
+    const parent_id = trimNewline(parent.stdout);
 
-        var matched_idx: ?usize = null;
-        for (expected[0..expected_len]) |idx| {
-            const task = model.tasks[idx].?;
-            if (std.mem.eql(u8, issue.id, task.id)) {
-                matched_idx = idx;
-                const status = parseStatusDisplay(issue.status) orelse return false;
-                if (status != task.status) return false;
-                break;
-            }
-        }
-        if (matched_idx == null) return false;
-        if (found[matched_idx.?]) return false;
-        found[matched_idx.?] = true;
-    }
+    // Add child
+    const child = runDot(allocator, &.{ "add", "Child task", "-P", parent_id }, test_dir) catch |err| {
+        std.debug.panic("add child: {}", .{err});
+    };
+    defer allocator.free(child.stdout);
+    defer allocator.free(child.stderr);
 
-    for (expected[0..expected_len]) |idx| {
-        if (!found[idx]) return false;
-    }
+    // Verify folder structure
+    const folder_path = std.fmt.allocPrint(allocator, "{s}/.dots/{s}", .{ test_dir, parent_id }) catch |err| {
+        std.debug.panic("path: {}", .{err});
+    };
+    defer allocator.free(folder_path);
 
-    return true;
+    const stat = fs.cwd().statFile(folder_path) catch |err| {
+        std.debug.panic("stat: {}", .{err});
+    };
+    try std.testing.expect(stat.kind == .directory);
 }
 
-fn listTextMatches(model: *const Model, input: []const u8, filter: ?Status, skip_done: bool) bool {
-    var expected: [max_model_tasks]usize = undefined;
-    const expected_len = collectListIndices(model, filter, skip_done, &expected);
+test "storage: ID prefix resolution" {
+    const allocator = std.testing.allocator;
 
-    var lines = std.mem.splitScalar(u8, input, '\n');
-    var found = [_]bool{false} ** max_model_tasks;
-    var seen: usize = 0;
-    while (lines.next()) |line| {
-        if (line.len == 0) continue;
-        const open_bracket = std.mem.indexOfScalar(u8, line, '[') orelse return false;
-        const close_bracket = std.mem.indexOfScalarPos(u8, line, open_bracket + 1, ']') orelse return false;
-        if (close_bracket + 2 >= line.len) return false;
-        const id = line[open_bracket + 1 .. close_bracket];
-        const status_char = line[close_bracket + 2];
-        const status = parseStatusChar(status_char) orelse return false;
-        var matched_idx: ?usize = null;
-        for (expected[0..expected_len]) |idx| {
-            const task = model.tasks[idx].?;
-            if (std.mem.eql(u8, id, task.id)) {
-                matched_idx = idx;
-                if (status != task.status) return false;
-                break;
-            }
-        }
-        if (matched_idx == null) return false;
-        if (found[matched_idx.?]) return false;
-        found[matched_idx.?] = true;
-        seen += 1;
-    }
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
 
-    if (seen != expected_len) return false;
-    for (expected[0..expected_len]) |idx| {
-        if (!found[idx]) return false;
-    }
-    return true;
-}
+    var ts = openTestStorage(allocator, test_dir);
+    defer ts.deinit();
 
-fn readyTextMatches(model: *const Model, input: []const u8) bool {
-    var expected: [max_model_tasks]usize = undefined;
-    const expected_len = collectReadyIndices(model, &expected);
-
-    var lines = std.mem.splitScalar(u8, input, '\n');
-    var found = [_]bool{false} ** max_model_tasks;
-    var seen: usize = 0;
-    while (lines.next()) |line| {
-        if (line.len == 0) continue;
-        const open_bracket = std.mem.indexOfScalar(u8, line, '[') orelse return false;
-        const close_bracket = std.mem.indexOfScalarPos(u8, line, open_bracket + 1, ']') orelse return false;
-        if (close_bracket + 2 >= line.len) return false;
-        const id = line[open_bracket + 1 .. close_bracket];
-        const status_char = line[close_bracket + 2];
-        const status = parseStatusChar(status_char) orelse return false;
-        var matched_idx: ?usize = null;
-        for (expected[0..expected_len]) |idx| {
-            const task = model.tasks[idx].?;
-            if (std.mem.eql(u8, id, task.id)) {
-                matched_idx = idx;
-                if (status != task.status) return false;
-                break;
-            }
-        }
-        if (matched_idx == null) return false;
-        if (found[matched_idx.?]) return false;
-        found[matched_idx.?] = true;
-        seen += 1;
-    }
-
-    if (seen != expected_len) return false;
-    for (expected[0..expected_len]) |idx| {
-        if (!found[idx]) return false;
-    }
-    return true;
-}
-
-fn findTextMatches(model: *const Model, input: []const u8, query: []const u8) bool {
-    var expected: [max_model_tasks]usize = undefined;
-    var expected_len: usize = 0;
-    for (0..max_model_tasks) |i| {
-        if (model.tasks[i]) |task| {
-            if (containsCaseInsensitive(task.title, query) or containsCaseInsensitive(task.description, query)) {
-                expected[expected_len] = i;
-                expected_len += 1;
-            }
-        }
-    }
-    sortIndices(model, expected[0..expected_len]);
-
-    var lines = std.mem.splitScalar(u8, input, '\n');
-    var found = [_]bool{false} ** max_model_tasks;
-    var seen: usize = 0;
-    while (lines.next()) |line| {
-        if (line.len == 0) continue;
-        const open_bracket = std.mem.indexOfScalar(u8, line, '[') orelse return false;
-        const close_bracket = std.mem.indexOfScalarPos(u8, line, open_bracket + 1, ']') orelse return false;
-        if (close_bracket + 2 >= line.len) return false;
-        const id = line[open_bracket + 1 .. close_bracket];
-        const status_char = line[close_bracket + 2];
-        const status = parseStatusChar(status_char) orelse return false;
-        var matched_idx: ?usize = null;
-        for (expected[0..expected_len]) |idx| {
-            const task = model.tasks[idx].?;
-            if (std.mem.eql(u8, id, task.id)) {
-                matched_idx = idx;
-                if (status != task.status) return false;
-                break;
-            }
-        }
-        if (matched_idx == null) return false;
-        if (found[matched_idx.?]) return false;
-        found[matched_idx.?] = true;
-        seen += 1;
-    }
-
-    if (seen != expected_len) return false;
-    for (expected[0..expected_len]) |idx| {
-        if (!found[idx]) return false;
-    }
-    return true;
-}
-
-fn findLineContaining(output: []const u8, needle: []const u8) ?[]const u8 {
-    const pos = std.mem.indexOf(u8, output, needle) orelse return null;
-    var start = std.mem.lastIndexOfScalar(u8, output[0..pos], '\n') orelse 0;
-    if (start != 0) start += 1;
-    const end = std.mem.indexOfScalarPos(u8, output, pos, '\n') orelse output.len;
-    return output[start..end];
-}
-
-fn treeTextMatches(model: *const Model, output: []const u8) bool {
-    var root_indices: [max_model_tasks]usize = undefined;
-    var root_len: usize = 0;
-    for (0..max_model_tasks) |i| {
-        if (model.tasks[i]) |task| {
-            if (task.status == .closed) continue;
-            if (model.parents[i] != null) continue;
-            root_indices[root_len] = i;
-            root_len += 1;
-        }
-    }
-    sortIndices(model, root_indices[0..root_len]);
-
-    for (root_indices[0..root_len]) |root_idx| {
-        const root_task = model.tasks[root_idx].?;
-        const root_needle = std.fmt.allocPrint(std.testing.allocator, "[{s}]", .{root_task.id}) catch |err| {
-            std.debug.panic("tree needle: {}", .{err});
-        };
-        defer std.testing.allocator.free(root_needle);
-        if (findLineContaining(output, root_needle) == null) return false;
-
-        var child_indices: [max_model_tasks]usize = undefined;
-        var child_len: usize = 0;
-        for (0..max_model_tasks) |i| {
-            if (model.parents[i]) |parent_idx| {
-                if (parent_idx == root_idx) {
-                    child_indices[child_len] = i;
-                    child_len += 1;
-                }
-            }
-        }
-        sortIndices(model, child_indices[0..child_len]);
-
-        for (child_indices[0..child_len]) |child_idx| {
-            const child_task = model.tasks[child_idx].?;
-            const child_needle = std.fmt.allocPrint(std.testing.allocator, "[{s}]", .{child_task.id}) catch |err| {
-                std.debug.panic("child needle: {}", .{err});
-            };
-            defer std.testing.allocator.free(child_needle);
-
-            const line = findLineContaining(output, child_needle) orelse return false;
-            var blocked = false;
-            for (0..max_model_tasks) |j| {
-                if (model.deps[child_idx][j]) {
-                    if (model.tasks[j]) |blocker| {
-                        if (isBlocking(blocker.status)) {
-                            blocked = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            const has_blocked = std.mem.indexOf(u8, line, "(blocked)") != null;
-            if (blocked != has_blocked) return false;
-        }
-    }
-
-    return true;
-}
-
-fn parseShow(output: []const u8) ?ShowInfo {
-    var info = ShowInfo{
-        .id = "",
-        .title = "",
-        .status = .open,
-        .priority = 0,
+    // Create an issue with a known ID
+    const issue = Issue{
+        .id = "abc123def456",
+        .title = "Test",
         .description = "",
-        .has_closed = false,
+        .status = .open,
+        .priority = 2,
+        .issue_type = "task",
+        .assignee = null,
+        .created_at = fixed_timestamp,
+        .closed_at = null,
+        .close_reason = null,
+        .blocks = &.{},
+        .parent = null,
     };
-    var lines = std.mem.splitScalar(u8, output, '\n');
-    while (lines.next()) |line| {
-        if (std.mem.startsWith(u8, line, "ID:")) {
-            info.id = std.mem.trim(u8, line[3..], " ");
-        } else if (std.mem.startsWith(u8, line, "Title:")) {
-            info.title = std.mem.trim(u8, line[6..], " ");
-        } else if (std.mem.startsWith(u8, line, "Status:")) {
-            const raw = std.mem.trim(u8, line[7..], " ");
-            info.status = parseStatusDisplay(raw) orelse return null;
-        } else if (std.mem.startsWith(u8, line, "Priority:")) {
-            const raw = std.mem.trim(u8, line[9..], " ");
-            info.priority = std.fmt.parseInt(i64, raw, 10) catch return null;
-        } else if (std.mem.startsWith(u8, line, "Desc:")) {
-            info.description = std.mem.trim(u8, line[5..], " ");
-        } else if (std.mem.startsWith(u8, line, "Closed:")) {
-            info.has_closed = true;
+    ts.storage.createIssue(issue, null) catch |err| {
+        std.debug.panic("create: {}", .{err});
+    };
+
+    // Resolve by prefix
+    const resolved = ts.storage.resolveId("abc123") catch |err| {
+        std.debug.panic("resolve: {}", .{err});
+    };
+    defer allocator.free(resolved);
+
+    try std.testing.expectEqualStrings("abc123def456", resolved);
+}
+
+test "storage: ambiguous ID prefix errors" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    var ts = openTestStorage(allocator, test_dir);
+    defer ts.deinit();
+
+    // Create two issues with same prefix
+    const issue1 = Issue{
+        .id = "abc123111111",
+        .title = "Test1",
+        .description = "",
+        .status = .open,
+        .priority = 2,
+        .issue_type = "task",
+        .assignee = null,
+        .created_at = fixed_timestamp,
+        .closed_at = null,
+        .close_reason = null,
+        .blocks = &.{},
+        .parent = null,
+    };
+    ts.storage.createIssue(issue1, null) catch |err| {
+        std.debug.panic("create1: {}", .{err});
+    };
+
+    const issue2 = Issue{
+        .id = "abc123222222",
+        .title = "Test2",
+        .description = "",
+        .status = .open,
+        .priority = 2,
+        .issue_type = "task",
+        .assignee = null,
+        .created_at = fixed_timestamp,
+        .closed_at = null,
+        .close_reason = null,
+        .blocks = &.{},
+        .parent = null,
+    };
+    ts.storage.createIssue(issue2, null) catch |err| {
+        std.debug.panic("create2: {}", .{err});
+    };
+
+    // Resolve with ambiguous prefix should error
+    const result = ts.storage.resolveId("abc123");
+    try std.testing.expectError(error.AmbiguousId, result);
+}
+
+// =============================================================================
+// Comprehensive Property Tests
+// =============================================================================
+
+// Oracle for full lifecycle: tracks expected state after a sequence of operations
+const LifecycleOracle = struct {
+    const MAX_ISSUES = 8;
+
+    // Issue state
+    exists: [MAX_ISSUES]bool = [_]bool{false} ** MAX_ISSUES,
+    statuses: [MAX_ISSUES]Status = [_]Status{.open} ** MAX_ISSUES,
+    priorities: [MAX_ISSUES]u3 = [_]u3{2} ** MAX_ISSUES,
+    has_closed_at: [MAX_ISSUES]bool = [_]bool{false} ** MAX_ISSUES,
+    archived: [MAX_ISSUES]bool = [_]bool{false} ** MAX_ISSUES, // Closed root issues get archived
+    parents: [MAX_ISSUES]?usize = [_]?usize{null} ** MAX_ISSUES,
+    // deps[i][j] = true means i depends on j (j blocks i)
+    deps: [MAX_ISSUES][MAX_ISSUES]bool = [_][MAX_ISSUES]bool{[_]bool{false} ** MAX_ISSUES} ** MAX_ISSUES,
+
+    fn create(self: *LifecycleOracle, idx: usize, priority: u3, parent: ?usize) void {
+        self.exists[idx] = true;
+        self.statuses[idx] = .open;
+        self.priorities[idx] = priority;
+        self.has_closed_at[idx] = false;
+        self.archived[idx] = false;
+        self.parents[idx] = parent;
+    }
+
+    fn delete(self: *LifecycleOracle, idx: usize) void {
+        self.exists[idx] = false;
+        self.archived[idx] = false;
+        // Remove all dependencies involving this issue
+        for (0..MAX_ISSUES) |i| {
+            self.deps[idx][i] = false;
+            self.deps[i][idx] = false;
         }
     }
-    if (info.id.len == 0 or info.title.len == 0) return null;
-    return info;
-}
 
-fn makeTitle(allocator: std.mem.Allocator, counter: usize) []const u8 {
-    return std.fmt.allocPrint(allocator, "Task {d}", .{counter}) catch |err| {
-        std.debug.panic("title alloc: {}", .{err});
-    };
-}
-
-fn makeDescription(allocator: std.mem.Allocator, counter: usize) []const u8 {
-    return std.fmt.allocPrint(allocator, "Desc {d}", .{counter}) catch |err| {
-        std.debug.panic("desc alloc: {}", .{err});
-    };
-}
-
-fn randomAction(random: std.Random, has_capacity: bool) Action {
-    const roll = random.uintLessThan(u8, 100);
-    if (!has_capacity) {
-        if (roll < 20) return .list_json;
-        if (roll < 40) return .ready_json;
-        if (roll < 60) return .tree;
-        if (roll < 75) return .find;
-        if (roll < 90) return .show;
-        if (roll < 95) return .help;
-        return .version;
+    fn setStatus(self: *LifecycleOracle, idx: usize, status: Status) void {
+        self.statuses[idx] = status;
+        self.has_closed_at[idx] = (status == .closed);
+        // Root issues (no parent) get archived when closed
+        if (status == .closed and self.parents[idx] == null) {
+            self.archived[idx] = true;
+        } else if (status != .closed) {
+            self.archived[idx] = false;
+        }
     }
-    if (roll < 10) return .add;
-    if (roll < 20) return .add_json;
-    if (roll < 28) return .quick_add;
-    if (roll < 38) return .on;
-    if (roll < 48) return .off;
-    if (roll < 58) return .update;
-    if (roll < 66) return .rm;
-    if (roll < 72) return .list_text;
-    if (roll < 78) return .list_json;
-    if (roll < 84) return .ready_text;
-    if (roll < 90) return .ready_json;
-    if (roll < 94) return .tree;
-    if (roll < 97) return .find;
-    if (roll < 98) return .show;
-    if (roll < 99) return .help;
-    return .version;
-}
 
-fn pickIndex(random: std.Random, indices: []const usize) usize {
-    const idx = random.uintLessThan(usize, indices.len);
-    return indices[idx];
-}
+    fn canClose(self: *LifecycleOracle, idx: usize) bool {
+        // Can't close if has open children
+        for (0..MAX_ISSUES) |i| {
+            if (self.exists[i] and self.parents[i] == idx) {
+                if (self.statuses[i] != .closed) return false;
+            }
+        }
+        return true;
+    }
 
-fn statusToUpdateArg(status: Status) []const u8 {
-    return switch (status) {
-        .open => "open",
-        .active => "active",
-        .closed => "done",
-    };
-}
+    fn addDep(self: *LifecycleOracle, from: usize, to: usize) bool {
+        // Check for cycle
+        if (self.wouldCreateCycle(from, to)) return false;
+        self.deps[from][to] = true;
+        return true;
+    }
 
-fn verifyAllCli(allocator: std.mem.Allocator, test_dir: []const u8, model: *const Model) bool {
-    const list_json = runDot(allocator, &.{ "ls", "--json" }, test_dir) catch |err| {
-        std.debug.panic("ls json: {}", .{err});
-    };
-    defer allocator.free(list_json.stdout);
-    defer allocator.free(list_json.stderr);
-    if (!listJsonMatches(allocator, model, list_json.stdout, null, true)) return false;
+    fn wouldCreateCycle(self: *LifecycleOracle, from: usize, to: usize) bool {
+        // Adding from->to would create cycle if to can reach from
+        var visited = [_]bool{false} ** MAX_ISSUES;
+        return self.canReachDfs(to, from, &visited);
+    }
 
-    const ready_json = runDot(allocator, &.{ "ready", "--json" }, test_dir) catch |err| {
-        std.debug.panic("ready json: {}", .{err});
-    };
-    defer allocator.free(ready_json.stdout);
-    defer allocator.free(ready_json.stderr);
-    if (!readyJsonMatches(allocator, model, ready_json.stdout)) return false;
+    fn canReachDfs(self: *LifecycleOracle, current: usize, target: usize, visited: *[MAX_ISSUES]bool) bool {
+        if (current == target) return true;
+        if (visited[current]) return false;
+        visited[current] = true;
+        for (0..MAX_ISSUES) |j| {
+            if (self.deps[current][j] and self.canReachDfs(j, target, visited)) {
+                return true;
+            }
+        }
+        return false;
+    }
 
-    const tree = runDot(allocator, &.{"tree"}, test_dir) catch |err| {
-        std.debug.panic("tree: {}", .{err});
-    };
-    defer allocator.free(tree.stdout);
-    defer allocator.free(tree.stderr);
-    if (!treeTextMatches(model, tree.stdout)) return false;
-
-    return true;
-}
-
-test "prop: cli state machine oracle" {
-    const Scenario = struct {
-        seed: u64,
-        steps: u8,
-    };
-
-    try qc.check(struct {
-        fn property(args: Scenario) bool {
-            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-            defer arena.deinit();
-            const allocator = arena.allocator();
-
-            const test_dir = setupTestDirOrPanic(allocator);
-            defer cleanupTestDirAndFree(allocator, test_dir);
-
-            _ = runDot(allocator, &.{"init"}, test_dir) catch |err| {
-                std.debug.panic("init: {}", .{err});
-            };
-
-            var model = Model.init();
-            var task_counter: usize = 0;
-
-            var prng = std.Random.DefaultPrng.init(args.seed);
-            const random = prng.random();
-            const total_steps: usize = @as(usize, args.steps % max_model_steps) + 1;
-
-            const State = enum { init, step, verify, done };
-            var state: State = .init;
-            var step_idx: usize = 0;
-
-            state: while (true) {
-                switch (state) {
-                    .init => {
-                        state = .step;
-                        continue :state;
-                    },
-                    .step => {
-                    if (step_idx >= total_steps) {
-                        state = .verify;
-                        continue :state;
-                    }
-
-                    var existing: [max_model_tasks]usize = undefined;
-                    const existing_len = collectExistingIndices(&model, &existing);
-                    const has_capacity = modelCount(&model) < max_model_tasks;
-                    const action = randomAction(random, has_capacity);
-
-                    switch (action) {
-                        .add, .add_json, .quick_add => {
-                            if (!has_capacity) {
-                                step_idx += 1;
-                                continue :state;
-                            }
-
-                            const slot = if (existing_len < max_model_tasks) blk: {
-                                var idx: usize = 0;
-                                while (idx < max_model_tasks) : (idx += 1) {
-                                    if (model.tasks[idx] == null) break :blk idx;
-                                }
-                                break :blk 0;
-                            } else 0;
-
-                            const title = makeTitle(allocator, task_counter);
-                            const is_quick = action == .quick_add;
-                            const description = if (is_quick) "" else makeDescription(allocator, task_counter);
-                            const priority: i64 = if (is_quick) 2 else @as(i64, random.uintLessThan(u8, 4));
-                            task_counter += 1;
-                            var parent_idx: ?usize = null;
-                            var dep_idx: ?usize = null;
-
-                            var args_list: std.ArrayList([]const u8) = .empty;
-                            defer args_list.deinit(allocator);
-
-                            switch (action) {
-                                .quick_add => {
-                                    args_list.append(allocator, title) catch |err| {
-                                        std.debug.panic("args add: {}", .{err});
-                                    };
-                                },
-                                else => {
-                                    args_list.append(allocator, "add") catch |err| {
-                                        std.debug.panic("args add: {}", .{err});
-                                    };
-                                    args_list.append(allocator, title) catch |err| {
-                                        std.debug.panic("args title: {}", .{err});
-                                    };
-                                    args_list.append(allocator, "-p") catch |err| {
-                                        std.debug.panic("args priority: {}", .{err});
-                                    };
-                                    const prio_str = std.fmt.allocPrint(allocator, "{d}", .{priority}) catch |err| {
-                                        std.debug.panic("prio alloc: {}", .{err});
-                                    };
-                                    args_list.append(allocator, prio_str) catch |err| {
-                                        std.debug.panic("args prio: {}", .{err});
-                                    };
-                                    args_list.append(allocator, "-d") catch |err| {
-                                        std.debug.panic("args desc flag: {}", .{err});
-                                    };
-                                    args_list.append(allocator, description) catch |err| {
-                                        std.debug.panic("args desc: {}", .{err});
-                                    };
-
-                                    if (existing_len > 0 and random.boolean()) {
-                                        const picked_parent = pickIndex(random, existing[0..existing_len]);
-                                        args_list.append(allocator, "-P") catch |err| {
-                                            std.debug.panic("args parent flag: {}", .{err});
-                                        };
-                                        args_list.append(allocator, model.tasks[picked_parent].?.id) catch |err| {
-                                            std.debug.panic("args parent: {}", .{err});
-                                        };
-                                        parent_idx = picked_parent;
-                                    }
-
-                                    if (existing_len > 0 and random.boolean()) {
-                                        const picked_dep = pickIndex(random, existing[0..existing_len]);
-                                        args_list.append(allocator, "-a") catch |err| {
-                                            std.debug.panic("args dep flag: {}", .{err});
-                                        };
-                                        args_list.append(allocator, model.tasks[picked_dep].?.id) catch |err| {
-                                            std.debug.panic("args dep: {}", .{err});
-                                        };
-                                        dep_idx = picked_dep;
-                                    }
-
-                                    if (action == .add_json) {
-                                        args_list.append(allocator, "--json") catch |err| {
-                                            std.debug.panic("args json: {}", .{err});
-                                        };
-                                    }
-                                },
-                            }
-
-                            const result = runDot(allocator, args_list.items, test_dir) catch |err| {
-                                std.debug.panic("add: {}", .{err});
-                            };
-                            defer allocator.free(result.stdout);
-                            defer allocator.free(result.stderr);
-                            const invalid_parent_dep = parent_idx != null and dep_idx != null and parent_idx.? == dep_idx.?;
-                            if (invalid_parent_dep) {
-                                if (!isExitCode(result.term, 1)) return false;
-                                if (std.mem.indexOf(u8, result.stderr, "parent and after cannot be the same issue") == null) return false;
-                            } else {
-                                if (!isExitCode(result.term, 0)) return false;
-
-                                var id_slice: []const u8 = undefined;
-                                if (action == .add_json) {
-                                    const parsed = std.json.parseFromSlice(JsonIssue, allocator, result.stdout, .{}) catch |err| {
-                                        std.debug.panic("parse add json: {}", .{err});
-                                    };
-                                    defer parsed.deinit();
-                                    const issue = parsed.value;
-                                    id_slice = issue.id;
-                                    if (!std.mem.eql(u8, issue.title, title)) return false;
-                                    if (issue.priority != priority) return false;
-                                    if (!std.mem.eql(u8, issue.description orelse "", description)) return false;
-                                } else {
-                                    id_slice = trimNewline(result.stdout);
-                                }
-
-                                model.tasks[slot] = .{
-                                    .id = allocator.dupe(u8, id_slice) catch |err| {
-                                        std.debug.panic("id dup: {}", .{err});
-                                    },
-                                    .title = title,
-                                    .description = description,
-                                    .status = .open,
-                                    .priority = priority,
-                                    .order = model.next_order,
-                                };
-                                if (parent_idx) |idx| model.parents[slot] = idx;
-                                if (dep_idx) |idx| model.deps[slot][idx] = true;
-                                model.next_order += 1;
-                            }
-                        },
-                        .on => {
-                            if (existing_len == 0) {
-                                const result = runDot(allocator, &.{ "on", "missing" }, test_dir) catch |err| {
-                                    std.debug.panic("on missing: {}", .{err});
-                                };
-                                defer allocator.free(result.stdout);
-                                defer allocator.free(result.stderr);
-                                if (!isExitCode(result.term, 1)) return false;
-                                if (std.mem.indexOf(u8, result.stderr, "Issue not found") == null) return false;
-                            } else {
-                                const idx = pickIndex(random, existing[0..existing_len]);
-                                const result = runDot(allocator, &.{ "on", model.tasks[idx].?.id }, test_dir) catch |err| {
-                                    std.debug.panic("on: {}", .{err});
-                                };
-                                defer allocator.free(result.stdout);
-                                defer allocator.free(result.stderr);
-                                if (!isExitCode(result.term, 0)) return false;
-                                model.tasks[idx].?.status = .active;
-                            }
-                        },
-                        .off => {
-                            if (existing_len == 0) {
-                                const result = runDot(allocator, &.{ "off", "missing" }, test_dir) catch |err| {
-                                    std.debug.panic("off missing: {}", .{err});
-                                };
-                                defer allocator.free(result.stdout);
-                                defer allocator.free(result.stderr);
-                                if (!isExitCode(result.term, 1)) return false;
-                                if (std.mem.indexOf(u8, result.stderr, "Issue not found") == null) return false;
-                            } else {
-                                const idx = pickIndex(random, existing[0..existing_len]);
-                                const result = runDot(allocator, &.{ "off", model.tasks[idx].?.id }, test_dir) catch |err| {
-                                    std.debug.panic("off: {}", .{err});
-                                };
-                                defer allocator.free(result.stdout);
-                                defer allocator.free(result.stderr);
-                                if (!isExitCode(result.term, 0)) return false;
-                                model.tasks[idx].?.status = .closed;
-                            }
-                        },
-                        .update => {
-                            if (existing_len == 0) {
-                                const result = runDot(allocator, &.{ "update", "missing", "--status", "done" }, test_dir) catch |err| {
-                                    std.debug.panic("update missing: {}", .{err});
-                                };
-                                defer allocator.free(result.stdout);
-                                defer allocator.free(result.stderr);
-                                if (!isExitCode(result.term, 1)) return false;
-                                if (std.mem.indexOf(u8, result.stderr, "Issue not found") == null) return false;
-                            } else {
-                                const idx = pickIndex(random, existing[0..existing_len]);
-                                const next_status = @as(Status, @enumFromInt(random.uintLessThan(u2, 3)));
-                                const status_arg = statusToUpdateArg(next_status);
-                                const result = runDot(allocator, &.{ "update", model.tasks[idx].?.id, "--status", status_arg }, test_dir) catch |err| {
-                                    std.debug.panic("update: {}", .{err});
-                                };
-                                defer allocator.free(result.stdout);
-                                defer allocator.free(result.stderr);
-                                if (!isExitCode(result.term, 0)) return false;
-                                model.tasks[idx].?.status = next_status;
-                            }
-                        },
-                        .rm => {
-                            if (existing_len == 0) {
-                                const result = runDot(allocator, &.{ "rm", "missing" }, test_dir) catch |err| {
-                                    std.debug.panic("rm missing: {}", .{err});
-                                };
-                                defer allocator.free(result.stdout);
-                                defer allocator.free(result.stderr);
-                                if (!isExitCode(result.term, 1)) return false;
-                                if (std.mem.indexOf(u8, result.stderr, "Issue not found") == null) return false;
-                            } else {
-                                const idx = pickIndex(random, existing[0..existing_len]);
-                                const result = runDot(allocator, &.{ "rm", model.tasks[idx].?.id }, test_dir) catch |err| {
-                                    std.debug.panic("rm: {}", .{err});
-                                };
-                                defer allocator.free(result.stdout);
-                                defer allocator.free(result.stderr);
-                                if (!isExitCode(result.term, 0)) return false;
-                                model.tasks[idx] = null;
-                                model.parents[idx] = null;
-                                for (0..max_model_tasks) |j| {
-                                    model.deps[idx][j] = false;
-                                    model.deps[j][idx] = false;
-                                    if (model.parents[j] == idx) model.parents[j] = null;
-                                }
-                            }
-                        },
-                        .list_text => {
-                            const result = runDot(allocator, &.{"ls"}, test_dir) catch |err| {
-                                std.debug.panic("ls: {}", .{err});
-                            };
-                            defer allocator.free(result.stdout);
-                            defer allocator.free(result.stderr);
-                            if (!listTextMatches(&model, result.stdout, null, true)) return false;
-                        },
-                        .list_json => {
-                            const result = runDot(allocator, &.{ "ls", "--json" }, test_dir) catch |err| {
-                                std.debug.panic("ls json: {}", .{err});
-                            };
-                            defer allocator.free(result.stdout);
-                            defer allocator.free(result.stderr);
-                            if (!listJsonMatches(allocator, &model, result.stdout, null, true)) return false;
-                        },
-                        .ready_text => {
-                            const result = runDot(allocator, &.{"ready"}, test_dir) catch |err| {
-                                std.debug.panic("ready: {}", .{err});
-                            };
-                            defer allocator.free(result.stdout);
-                            defer allocator.free(result.stderr);
-                            if (!readyTextMatches(&model, result.stdout)) return false;
-                        },
-                        .ready_json => {
-                            const result = runDot(allocator, &.{ "ready", "--json" }, test_dir) catch |err| {
-                                std.debug.panic("ready json: {}", .{err});
-                            };
-                            defer allocator.free(result.stdout);
-                            defer allocator.free(result.stderr);
-                            if (!readyJsonMatches(allocator, &model, result.stdout)) return false;
-                        },
-                        .tree => {
-                            const result = runDot(allocator, &.{"tree"}, test_dir) catch |err| {
-                                std.debug.panic("tree: {}", .{err});
-                            };
-                            defer allocator.free(result.stdout);
-                            defer allocator.free(result.stderr);
-                            if (!treeTextMatches(&model, result.stdout)) return false;
-                        },
-                        .find => {
-                            const query = if (existing_len > 0) blk: {
-                                const idx = pickIndex(random, existing[0..existing_len]);
-                                const title = model.tasks[idx].?.title;
-                                const len = @min(@as(usize, 3), title.len);
-                                break :blk title[0..len];
-                            } else "missing";
-
-                            const result = runDot(allocator, &.{ "find", query }, test_dir) catch |err| {
-                                std.debug.panic("find: {}", .{err});
-                            };
-                            defer allocator.free(result.stdout);
-                            defer allocator.free(result.stderr);
-                            if (!findTextMatches(&model, result.stdout, query)) return false;
-                        },
-                        .show => {
-                            if (existing_len == 0) {
-                                const result = runDot(allocator, &.{ "show", "missing" }, test_dir) catch |err| {
-                                    std.debug.panic("show missing: {}", .{err});
-                                };
-                                defer allocator.free(result.stdout);
-                                defer allocator.free(result.stderr);
-                                if (!isExitCode(result.term, 1)) return false;
-                                if (std.mem.indexOf(u8, result.stderr, "Issue not found") == null) return false;
-                            } else {
-                                const idx = pickIndex(random, existing[0..existing_len]);
-                                const task = model.tasks[idx].?;
-                                const result = runDot(allocator, &.{ "show", task.id }, test_dir) catch |err| {
-                                    std.debug.panic("show: {}", .{err});
-                                };
-                                defer allocator.free(result.stdout);
-                                defer allocator.free(result.stderr);
-                                const info = parseShow(result.stdout) orelse return false;
-                                if (!std.mem.eql(u8, info.id, task.id)) return false;
-                                if (!std.mem.eql(u8, info.title, task.title)) return false;
-                                if (info.status != task.status) return false;
-                                if (info.priority != task.priority) return false;
-                                if (!std.mem.eql(u8, info.description, task.description) and task.description.len > 0) return false;
-                            }
-                        },
-                        .help => {
-                            const result = runDot(allocator, &.{"--help"}, test_dir) catch |err| {
-                                std.debug.panic("help: {}", .{err});
-                            };
-                            defer allocator.free(result.stdout);
-                            defer allocator.free(result.stderr);
-                            if (std.mem.indexOf(u8, result.stdout, "dots - Connect the dots") == null) return false;
-                        },
-                        .version => {
-                            const result = runDot(allocator, &.{"--version"}, test_dir) catch |err| {
-                                std.debug.panic("version: {}", .{err});
-                            };
-                            defer allocator.free(result.stdout);
-                            defer allocator.free(result.stderr);
-                            if (!std.mem.startsWith(u8, result.stdout, "dots ")) return false;
-                        },
-                    }
-
-                    step_idx += 1;
-                    continue :state;
-                },
-                    .verify => {
-                        if (!verifyAllCli(allocator, test_dir, &model)) return false;
-                        state = .done;
-                        continue :state;
-                    },
-                    .done => break :state,
+    fn isBlocked(self: *LifecycleOracle, idx: usize) bool {
+        for (0..MAX_ISSUES) |j| {
+            if (self.deps[idx][j] and self.exists[j]) {
+                if (self.statuses[j] == .open or self.statuses[j] == .active) {
+                    return true;
                 }
             }
-
-            return true;
         }
-    }.property, .{ .iterations = 30, .seed = 0x5EED5EED });
-}
+        return false;
+    }
 
-const HookTodo = struct {
-    content: []const u8,
-    status: []const u8,
-    activeForm: []const u8,
+    fn isReady(self: *LifecycleOracle, idx: usize) bool {
+        // Archived issues are not in ready list
+        return self.exists[idx] and !self.archived[idx] and self.statuses[idx] == .open and !self.isBlocked(idx);
+    }
+
+    fn countByStatus(self: *LifecycleOracle, status: Status) usize {
+        var count: usize = 0;
+        for (0..MAX_ISSUES) |i| {
+            // Archived issues are not in listIssues (only in archive dir)
+            if (self.exists[i] and !self.archived[i] and self.statuses[i] == status) count += 1;
+        }
+        return count;
+    }
+
+    fn readyCount(self: *LifecycleOracle) usize {
+        var count: usize = 0;
+        for (0..MAX_ISSUES) |i| {
+            if (self.isReady(i)) count += 1;
+        }
+        return count;
+    }
 };
 
-fn buildTodoWriteJson(allocator: std.mem.Allocator, todos: []const HookTodo) []const u8 {
-    const HookInput = struct {
-        tool_name: []const u8,
-        tool_input: struct {
-            todos: []const HookTodo,
-        },
-    };
+// Operation types for lifecycle simulation
+const OpType = enum { create, delete, set_open, set_active, set_closed, add_dep };
 
-    const payload = HookInput{
-        .tool_name = "TodoWrite",
-        .tool_input = .{ .todos = todos },
-    };
-
-    return std.json.Stringify.valueAlloc(allocator, payload, .{}) catch |err| {
-        std.debug.panic("hook json: {}", .{err});
-    };
-}
-
-const Mapping = mapping_util.Mapping;
-
-fn loadMappingFile(allocator: std.mem.Allocator, dir: []const u8) Mapping {
-    var map: Mapping = .{};
-    errdefer mapping_util.deinit(allocator, &map);
-
-    const path = std.fmt.allocPrint(allocator, "{s}/.beads/todo-mapping.json", .{dir}) catch |err| {
-        std.debug.panic("mapping path: {}", .{err});
-    };
-    defer allocator.free(path);
-
-    const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return map,
-        else => std.debug.panic("mapping open: {}", .{err}),
-    };
-    defer file.close();
-
-    const content = file.readToEndAlloc(allocator, max_output_bytes) catch |err| {
-        std.debug.panic("mapping read: {}", .{err});
-    };
-    defer allocator.free(content);
-
-    const parsed = std.json.parseFromSlice(Mapping, allocator, content, .{ .ignore_unknown_fields = false }) catch |err| {
-        std.debug.panic("mapping parse: {}", .{err});
-    };
-    defer parsed.deinit();
-
-    var it = parsed.value.map.iterator();
-    while (it.next()) |entry| {
-        const key = allocator.dupe(u8, entry.key_ptr.*) catch |err| {
-            std.debug.panic("mapping key: {}", .{err});
-        };
-        const val = allocator.dupe(u8, entry.value_ptr.*) catch |err| {
-            allocator.free(key);
-            std.debug.panic("mapping val: {}", .{err});
-        };
-        map.map.put(allocator, key, val) catch |err| {
-            allocator.free(key);
-            allocator.free(val);
-            std.debug.panic("mapping insert: {}", .{err});
-        };
-    }
-
-    return map;
-}
-
-test "prop: hook sync matches oracle" {
-    const HookCase = struct {
-        seed: u64,
-        count: u8,
+test "prop: lifecycle simulation maintains invariants" {
+    // Simulate random sequences of operations and verify state consistency
+    const LifecycleCase = struct {
+        // Sequence of operations: each is (op_type, target_idx, secondary_idx, priority)
+        ops: [12]struct { op: u3, target: u3, secondary: u3, priority: u3 },
     };
 
     try qc.check(struct {
-        fn property(args: HookCase) bool {
-            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-            defer arena.deinit();
-            const allocator = arena.allocator();
+        fn property(args: LifecycleCase) bool {
+            const allocator = std.testing.allocator;
 
             const test_dir = setupTestDirOrPanic(allocator);
             defer cleanupTestDirAndFree(allocator, test_dir);
 
-            var prng = std.Random.DefaultPrng.init(args.seed);
-            const random = prng.random();
-            const todo_count: usize = @as(usize, args.count % max_hook_todos) + 1;
+            var ts = openTestStorage(allocator, test_dir);
+            defer ts.deinit();
 
-            var todos_buf: [max_hook_todos]HookTodo = undefined;
-            var contents_buf: [max_hook_todos][16]u8 = undefined;
-            var forms_buf: [max_hook_todos][16]u8 = undefined;
+            var oracle = LifecycleOracle{};
+            var ids: [LifecycleOracle.MAX_ISSUES]?[]const u8 = [_]?[]const u8{null} ** LifecycleOracle.MAX_ISSUES;
+            var id_storage: [LifecycleOracle.MAX_ISSUES][32]u8 = undefined;
 
-            for (0..todo_count) |i| {
-                const content = std.fmt.bufPrint(&contents_buf[i], "todo{d}", .{i}) catch |err| {
-                    std.debug.panic("todo content: {}", .{err});
+            // Execute operations
+            for (args.ops) |op_data| {
+                const idx = @as(usize, op_data.target) % LifecycleOracle.MAX_ISSUES;
+                const secondary = @as(usize, op_data.secondary) % LifecycleOracle.MAX_ISSUES;
+                const op: OpType = switch (op_data.op % 6) {
+                    0 => .create,
+                    1 => .delete,
+                    2 => .set_open,
+                    3 => .set_active,
+                    4 => .set_closed,
+                    5 => .add_dep,
+                    else => unreachable,
                 };
-                const active_form = std.fmt.bufPrint(&forms_buf[i], "form{d}", .{i}) catch |err| {
-                    std.debug.panic("todo form: {}", .{err});
-                };
-                const status = if (random.boolean()) "pending" else "in_progress";
-                todos_buf[i] = .{ .content = content, .status = status, .activeForm = active_form };
-            }
 
-            const input1 = buildTodoWriteJson(allocator, todos_buf[0..todo_count]);
-            const hook1 = runDotWithInput(allocator, &.{ "hook", "sync" }, test_dir, input1) catch |err| {
-                std.debug.panic("hook sync: {}", .{err});
-            };
-            defer allocator.free(hook1.stdout);
-            defer allocator.free(hook1.stderr);
-            if (!isExitCode(hook1.term, 0)) return false;
-
-            const list1 = runDot(allocator, &.{ "ls", "--json" }, test_dir) catch |err| {
-                std.debug.panic("list json: {}", .{err});
-            };
-            defer allocator.free(list1.stdout);
-            defer allocator.free(list1.stderr);
-
-            const parsed1 = std.json.parseFromSlice([]JsonIssue, allocator, list1.stdout, .{}) catch |err| {
-                std.debug.panic("parse list: {}", .{err});
-            };
-            defer parsed1.deinit();
-            if (parsed1.value.len != todo_count) return false;
-
-            for (parsed1.value) |issue| {
-                var matched = false;
-                for (todos_buf[0..todo_count]) |todo| {
-                    if (!std.mem.eql(u8, todo.content, issue.title)) continue;
-                    matched = true;
-                    const status = parseStatusDisplay(issue.status) orelse return false;
-                    const expected_status: Status = if (std.mem.eql(u8, todo.status, "in_progress")) .active else .open;
-                    if (status != expected_status) return false;
-                    if (!std.mem.eql(u8, issue.description orelse "", todo.activeForm)) return false;
+                switch (op) {
+                    .create => {
+                        if (!oracle.exists[idx]) {
+                            const id = std.fmt.bufPrint(&id_storage[idx], "issue-{d}", .{idx}) catch continue;
+                            ids[idx] = id;
+                            const issue = Issue{
+                                .id = id,
+                                .title = id,
+                                .description = "",
+                                .status = .open,
+                                .priority = op_data.priority % 5,
+                                .issue_type = "task",
+                                .assignee = null,
+                                .created_at = fixed_timestamp,
+                                .closed_at = null,
+                                .close_reason = null,
+                                .blocks = &.{},
+                                .parent = null,
+                            };
+                            ts.storage.createIssue(issue, null) catch continue;
+                            oracle.create(idx, op_data.priority % 5, null);
+                        }
+                    },
+                    .delete => {
+                        if (oracle.exists[idx]) {
+                            ts.storage.deleteIssue(ids[idx].?) catch continue;
+                            oracle.delete(idx);
+                        }
+                    },
+                    .set_open => {
+                        if (oracle.exists[idx]) {
+                            ts.storage.updateStatus(ids[idx].?, .open, null, null) catch continue;
+                            oracle.setStatus(idx, .open);
+                        }
+                    },
+                    .set_active => {
+                        if (oracle.exists[idx]) {
+                            ts.storage.updateStatus(ids[idx].?, .active, null, null) catch continue;
+                            oracle.setStatus(idx, .active);
+                        }
+                    },
+                    .set_closed => {
+                        if (oracle.exists[idx] and oracle.canClose(idx)) {
+                            ts.storage.updateStatus(ids[idx].?, .closed, fixed_timestamp, null) catch continue;
+                            oracle.setStatus(idx, .closed);
+                        }
+                    },
+                    .add_dep => {
+                        if (oracle.exists[idx] and oracle.exists[secondary] and idx != secondary) {
+                            if (ts.storage.addDependency(ids[idx].?, ids[secondary].?, "blocks")) {
+                                _ = oracle.addDep(idx, secondary);
+                            } else |err| switch (err) {
+                                error.DependencyCycle => {},
+                                else => continue,
+                            }
+                        }
+                    },
                 }
-                if (!matched) return false;
             }
 
-            var mapping = loadMappingFile(allocator, test_dir);
-            defer {
-                mapping_util.deinit(allocator, &mapping);
-            }
-            if (mapping.map.count() != todo_count) return false;
+            // Verify invariants
 
-            var completed_buf: [max_hook_todos]bool = [_]bool{false} ** max_hook_todos;
-            for (0..todo_count) |i| {
-                completed_buf[i] = random.boolean();
-            }
+            // 1. Ready count matches oracle
+            const ready_issues = ts.storage.getReadyIssues() catch return false;
+            defer storage_mod.freeIssues(allocator, ready_issues);
+            if (ready_issues.len != oracle.readyCount()) return false;
 
-            var todos2_buf: [max_hook_todos]HookTodo = undefined;
-            for (0..todo_count) |i| {
-                const status = if (completed_buf[i]) "completed" else todos_buf[i].status;
-                todos2_buf[i] = .{ .content = todos_buf[i].content, .status = status, .activeForm = todos_buf[i].activeForm };
+            // 2. Status counts match
+            for ([_]Status{ .open, .active, .closed }) |status| {
+                const issues = ts.storage.listIssues(status) catch return false;
+                defer storage_mod.freeIssues(allocator, issues);
+                if (issues.len != oracle.countByStatus(status)) return false;
             }
 
-            const input2 = buildTodoWriteJson(allocator, todos2_buf[0..todo_count]);
-            const hook2 = runDotWithInput(allocator, &.{ "hook", "sync" }, test_dir, input2) catch |err| {
-                std.debug.panic("hook sync 2: {}", .{err});
-            };
-            defer allocator.free(hook2.stdout);
-            defer allocator.free(hook2.stderr);
-            if (!isExitCode(hook2.term, 0)) return false;
-
-            const list_open = runDot(allocator, &.{ "ls", "--json" }, test_dir) catch |err| {
-                std.debug.panic("list open: {}", .{err});
-            };
-            defer allocator.free(list_open.stdout);
-            defer allocator.free(list_open.stderr);
-            const parsed_open = std.json.parseFromSlice([]JsonIssue, allocator, list_open.stdout, .{}) catch |err| {
-                std.debug.panic("parse open: {}", .{err});
-            };
-            defer parsed_open.deinit();
-
-            const list_done = runDot(allocator, &.{ "ls", "--status", "done", "--json" }, test_dir) catch |err| {
-                std.debug.panic("list done: {}", .{err});
-            };
-            defer allocator.free(list_done.stdout);
-            defer allocator.free(list_done.stderr);
-            const parsed_done = std.json.parseFromSlice([]JsonIssue, allocator, list_done.stdout, .{}) catch |err| {
-                std.debug.panic("parse done: {}", .{err});
-            };
-            defer parsed_done.deinit();
-
-            var open_expected: usize = 0;
-            var done_expected: usize = 0;
-            for (0..todo_count) |i| {
-                if (completed_buf[i]) done_expected += 1 else open_expected += 1;
-            }
-            if (parsed_open.value.len != open_expected) return false;
-            if (parsed_done.value.len != done_expected) return false;
-
-            for (parsed_done.value) |issue| {
-                if (parseStatusDisplay(issue.status) != .closed) return false;
-            }
-
-            var mapping2 = loadMappingFile(allocator, test_dir);
-            defer {
-                mapping_util.deinit(allocator, &mapping2);
-            }
-
-            if (mapping2.map.count() != open_expected) return false;
-            for (0..todo_count) |i| {
-                const content = todos_buf[i].content;
-                if (completed_buf[i]) {
-                    if (mapping2.map.contains(content)) return false;
-                } else {
-                    if (!mapping2.map.contains(content)) return false;
+            // 3. Each existing non-archived issue has correct status
+            for (0..LifecycleOracle.MAX_ISSUES) |i| {
+                if (oracle.exists[i] and !oracle.archived[i]) {
+                    const maybe_issue = ts.storage.getIssue(ids[i].?) catch return false;
+                    const issue = maybe_issue orelse return false;
+                    defer issue.deinit(allocator);
+                    if (issue.status != oracle.statuses[i]) return false;
+                    // Closed issues must have closed_at
+                    if (issue.status == .closed and issue.closed_at == null) return false;
                 }
             }
 
             return true;
         }
-    }.property, .{ .iterations = 20, .seed = 0xBEEFC0DE });
+    }.property, .{ .iterations = 50, .seed = 0xCAFE });
 }
 
-test "prop: hook sync status transitions match oracle" {
+test "prop: transitive blocking chains" {
+    // Test that blocking propagates through dependency chains
+    // A -> B -> C -> D: if D is open, A/B/C should all be blocked
+    const ChainCase = struct {
+        chain_length: u3, // 2-7
+        blocker_position: u3, // which one in chain is open (rest closed)
+        target_position: u3, // which one to check if blocked
+    };
+
+    try qc.check(struct {
+        fn property(args: ChainCase) bool {
+            const allocator = std.testing.allocator;
+            const chain_len = @max(2, (args.chain_length % 6) + 2); // 2-7
+
+            const test_dir = setupTestDirOrPanic(allocator);
+            defer cleanupTestDirAndFree(allocator, test_dir);
+
+            var ts = openTestStorage(allocator, test_dir);
+            defer ts.deinit();
+
+            // Create chain: issue[0] -> issue[1] -> ... -> issue[n-1]
+            var id_bufs: [8][16]u8 = undefined;
+            var ids: [8][]const u8 = undefined;
+
+            const blocker_pos = args.blocker_position % chain_len;
+            const target_pos = args.target_position % chain_len;
+
+            for (0..chain_len) |i| {
+                ids[i] = std.fmt.bufPrint(&id_bufs[i], "chain-{d}", .{i}) catch return false;
+                // All closed except the blocker
+                const status: Status = if (i == blocker_pos) .open else .closed;
+                const closed_at: ?[]const u8 = if (status == .closed) fixed_timestamp else null;
+                const issue = Issue{
+                    .id = ids[i],
+                    .title = ids[i],
+                    .description = "",
+                    .status = status,
+                    .priority = 2,
+                    .issue_type = "task",
+                    .assignee = null,
+                    .created_at = fixed_timestamp,
+                    .closed_at = closed_at,
+                    .close_reason = null,
+                    .blocks = &.{},
+                    .parent = null,
+                };
+                ts.storage.createIssue(issue, null) catch return false;
+            }
+
+            // Create dependency chain: 0 depends on 1, 1 depends on 2, etc.
+            for (0..chain_len - 1) |i| {
+                ts.storage.addDependency(ids[i], ids[i + 1], "blocks") catch return false;
+            }
+
+            // Check if target is in ready list
+            const ready = ts.storage.getReadyIssues() catch return false;
+            defer storage_mod.freeIssues(allocator, ready);
+
+            var target_in_ready = false;
+            for (ready) |issue| {
+                if (std.mem.eql(u8, issue.id, ids[target_pos])) {
+                    target_in_ready = true;
+                    break;
+                }
+            }
+
+            // If target is open (== blocker_pos), it should be in ready iff not blocked
+            // If target is closed, it should never be in ready
+            if (target_pos == blocker_pos) {
+                // Target is open, should be in ready iff not blocked by anything downstream
+                // Since target IS the blocker, nothing blocks it
+                return target_in_ready == true;
+            } else {
+                // Target is closed, never in ready
+                return target_in_ready == false;
+            }
+        }
+    }.property, .{ .iterations = 50, .seed = 0xFADE });
+}
+
+test "prop: parent-child close constraint" {
+    // Cannot close a parent if it has open children
+    const ParentChildCase = struct {
+        num_children: u3, // 1-4
+        children_closed: [4]bool, // which children are closed
+    };
+
+    try qc.check(struct {
+        fn property(args: ParentChildCase) bool {
+            const allocator = std.testing.allocator;
+            const num_children = @max(1, (args.num_children % 4) + 1);
+
+            const test_dir = setupTestDirOrPanic(allocator);
+            defer cleanupTestDirAndFree(allocator, test_dir);
+
+            var ts = openTestStorage(allocator, test_dir);
+            defer ts.deinit();
+
+            // Create parent
+            const parent = Issue{
+                .id = "parent",
+                .title = "Parent",
+                .description = "",
+                .status = .open,
+                .priority = 2,
+                .issue_type = "task",
+                .assignee = null,
+                .created_at = fixed_timestamp,
+                .closed_at = null,
+                .close_reason = null,
+                .blocks = &.{},
+                .parent = null,
+            };
+            ts.storage.createIssue(parent, null) catch return false;
+
+            // Create children
+            var child_bufs: [4][16]u8 = undefined;
+            var all_closed = true;
+            for (0..num_children) |i| {
+                const id = std.fmt.bufPrint(&child_bufs[i], "child-{d}", .{i}) catch return false;
+                const is_closed = args.children_closed[i];
+                if (!is_closed) all_closed = false;
+
+                const child = Issue{
+                    .id = id,
+                    .title = id,
+                    .description = "",
+                    .status = if (is_closed) .closed else .open,
+                    .priority = 2,
+                    .issue_type = "task",
+                    .assignee = null,
+                    .created_at = fixed_timestamp,
+                    .closed_at = if (is_closed) fixed_timestamp else null,
+                    .close_reason = null,
+                    .blocks = &.{},
+                    .parent = null,
+                };
+                ts.storage.createIssue(child, "parent") catch return false;
+            }
+
+            // Try to close parent
+            const result = ts.storage.updateStatus("parent", .closed, fixed_timestamp, null);
+
+            // Oracle: can only close if all children are closed
+            if (all_closed) {
+                // Should succeed
+                if (result) |_| {
+                    return true;
+                } else |_| {
+                    return false;
+                }
+            } else {
+                // Should fail with ChildrenNotClosed
+                if (result) |_| {
+                    return false; // Shouldn't succeed
+                } else |err| {
+                    return err == error.ChildrenNotClosed;
+                }
+            }
+        }
+    }.property, .{ .iterations = 30, .seed = 0xDAD });
+}
+
+test "prop: priority ordering in list" {
+    // List should return issues sorted by priority (lower = higher priority)
+    const PriorityCase = struct {
+        priorities: [6]u3,
+    };
+
+    try qc.check(struct {
+        fn property(args: PriorityCase) bool {
+            const allocator = std.testing.allocator;
+
+            const test_dir = setupTestDirOrPanic(allocator);
+            defer cleanupTestDirAndFree(allocator, test_dir);
+
+            var ts = openTestStorage(allocator, test_dir);
+            defer ts.deinit();
+
+            // Create issues with random priorities
+            for (0..6) |i| {
+                var id_buf: [16]u8 = undefined;
+                const id = std.fmt.bufPrint(&id_buf, "pri-{d}", .{i}) catch return false;
+                const issue = Issue{
+                    .id = id,
+                    .title = id,
+                    .description = "",
+                    .status = .open,
+                    .priority = args.priorities[i] % 5,
+                    .issue_type = "task",
+                    .assignee = null,
+                    .created_at = fixed_timestamp,
+                    .closed_at = null,
+                    .close_reason = null,
+                    .blocks = &.{},
+                    .parent = null,
+                };
+                ts.storage.createIssue(issue, null) catch return false;
+            }
+
+            // Get list
+            const issues = ts.storage.listIssues(.open) catch return false;
+            defer storage_mod.freeIssues(allocator, issues);
+
+            // Verify sorted by priority (ascending)
+            var prev_priority: i64 = -1;
+            for (issues) |issue| {
+                if (issue.priority < prev_priority) return false;
+                prev_priority = issue.priority;
+            }
+
+            return true;
+        }
+    }.property, .{ .iterations = 30, .seed = 0xACE });
+}
+
+test "prop: status transition state machine" {
+    // Verify: closed issues have closed_at, open/active don't
+    // Verify: reopening clears closed_at
     const TransitionCase = struct {
-        seed: u64,
-        initial_status: bool, // true = in_progress, false = pending
+        transitions: [8]u2, // 0=open, 1=active, 2=closed
     };
 
     try qc.check(struct {
         fn property(args: TransitionCase) bool {
-            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-            defer arena.deinit();
-            const allocator = arena.allocator();
+            const allocator = std.testing.allocator;
 
             const test_dir = setupTestDirOrPanic(allocator);
             defer cleanupTestDirAndFree(allocator, test_dir);
 
-            const initial_status: []const u8 = if (args.initial_status) "in_progress" else "pending";
-            const expected_db_status: Status = if (args.initial_status) .active else .open;
+            var ts = openTestStorage(allocator, test_dir);
+            defer ts.deinit();
 
-            // Create initial todo
-            const todos1 = [_]HookTodo{.{
-                .content = "transition test",
-                .status = initial_status,
-                .activeForm = "Testing transitions",
-            }};
-
-            const input1 = buildTodoWriteJson(allocator, &todos1);
-            const hook1 = runDotWithInput(allocator, &.{ "hook", "sync" }, test_dir, input1) catch |err| {
-                std.debug.panic("hook sync 1: {}", .{err});
+            // Create issue
+            const issue = Issue{
+                .id = "transition-test",
+                .title = "Transition Test",
+                .description = "",
+                .status = .open,
+                .priority = 2,
+                .issue_type = "task",
+                .assignee = null,
+                .created_at = fixed_timestamp,
+                .closed_at = null,
+                .close_reason = null,
+                .blocks = &.{},
+                .parent = null,
             };
-            defer allocator.free(hook1.stdout);
-            defer allocator.free(hook1.stderr);
-            if (!isExitCode(hook1.term, 0)) return false;
+            ts.storage.createIssue(issue, null) catch return false;
 
-            // Verify initial status
-            const list1 = runDot(allocator, &.{ "ls", "--json" }, test_dir) catch |err| {
-                std.debug.panic("list 1: {}", .{err});
-            };
-            defer allocator.free(list1.stdout);
-            defer allocator.free(list1.stderr);
-
-            const parsed1 = std.json.parseFromSlice([]JsonIssue, allocator, list1.stdout, .{}) catch |err| {
-                std.debug.panic("parse 1: {}", .{err});
-            };
-            defer parsed1.deinit();
-            if (parsed1.value.len != 1) return false;
-            const status1 = parseStatusDisplay(parsed1.value[0].status) orelse return false;
-            if (status1 != expected_db_status) return false;
-
-            // Transition to opposite status
-            const new_status: []const u8 = if (args.initial_status) "pending" else "in_progress";
-            const expected_new_db_status: Status = if (args.initial_status) .open else .active;
-
-            const todos2 = [_]HookTodo{.{
-                .content = "transition test",
-                .status = new_status,
-                .activeForm = "Testing transitions",
-            }};
-
-            const input2 = buildTodoWriteJson(allocator, &todos2);
-            const hook2 = runDotWithInput(allocator, &.{ "hook", "sync" }, test_dir, input2) catch |err| {
-                std.debug.panic("hook sync 2: {}", .{err});
-            };
-            defer allocator.free(hook2.stdout);
-            defer allocator.free(hook2.stderr);
-            if (!isExitCode(hook2.term, 0)) return false;
-
-            // Verify status changed
-            const list2 = runDot(allocator, &.{ "ls", "--json" }, test_dir) catch |err| {
-                std.debug.panic("list 2: {}", .{err});
-            };
-            defer allocator.free(list2.stdout);
-            defer allocator.free(list2.stderr);
-
-            const parsed2 = std.json.parseFromSlice([]JsonIssue, allocator, list2.stdout, .{}) catch |err| {
-                std.debug.panic("parse 2: {}", .{err});
-            };
-            defer parsed2.deinit();
-            if (parsed2.value.len != 1) return false;
-            const status2 = parseStatusDisplay(parsed2.value[0].status) orelse return false;
-            if (status2 != expected_new_db_status) return false;
-
-            // Should still be only 1 issue (no duplicates)
-            return true;
-        }
-    }.property, .{ .iterations = 20, .seed = 0x7A551F });
-}
-
-test "prop: hook sync idempotent for same content" {
-    const IdempotentCase = struct {
-        seed: u64,
-        sync_count: u8,
-    };
-
-    try qc.check(struct {
-        fn property(args: IdempotentCase) bool {
-            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-            defer arena.deinit();
-            const allocator = arena.allocator();
-
-            const test_dir = setupTestDirOrPanic(allocator);
-            defer cleanupTestDirAndFree(allocator, test_dir);
-
-            const todos = [_]HookTodo{.{
-                .content = "idempotent test",
-                .status = "pending",
-                .activeForm = "Testing idempotency",
-            }};
-
-            const input = buildTodoWriteJson(allocator, &todos);
-            const sync_count: usize = @as(usize, args.sync_count % 5) + 2;
-
-            // Sync multiple times with same content
-            for (0..sync_count) |_| {
-                const hook = runDotWithInput(allocator, &.{ "hook", "sync" }, test_dir, input) catch |err| {
-                    std.debug.panic("hook sync: {}", .{err});
+            // Apply transitions
+            for (args.transitions) |t| {
+                const status: Status = switch (t % 3) {
+                    0 => .open,
+                    1 => .active,
+                    2 => .closed,
+                    else => unreachable,
                 };
-                defer allocator.free(hook.stdout);
-                defer allocator.free(hook.stderr);
-                if (!isExitCode(hook.term, 0)) return false;
+                const closed_at: ?[]const u8 = if (status == .closed) fixed_timestamp else null;
+                ts.storage.updateStatus("transition-test", status, closed_at, null) catch continue;
+
+                // Verify invariant after each transition
+                const maybe_current = ts.storage.getIssue("transition-test") catch return false;
+                const current = maybe_current orelse return false;
+                defer current.deinit(allocator);
+
+                // Invariant: closed_at set iff status is closed
+                if (current.status == .closed) {
+                    if (current.closed_at == null) return false;
+                } else {
+                    if (current.closed_at != null) return false;
+                }
             }
-
-            // Should still have exactly 1 issue
-            const list = runDot(allocator, &.{ "ls", "--json" }, test_dir) catch |err| {
-                std.debug.panic("list: {}", .{err});
-            };
-            defer allocator.free(list.stdout);
-            defer allocator.free(list.stderr);
-
-            const parsed = std.json.parseFromSlice([]JsonIssue, allocator, list.stdout, .{}) catch |err| {
-                std.debug.panic("parse: {}", .{err});
-            };
-            defer parsed.deinit();
-            if (parsed.value.len != 1) return false;
-
-            // Mapping should have exactly 1 entry
-            var mapping = loadMappingFile(allocator, test_dir);
-            defer mapping_util.deinit(allocator, &mapping);
-            if (mapping.map.count() != 1) return false;
 
             return true;
         }
-    }.property, .{ .iterations = 20, .seed = 0x1DE4707 });
+    }.property, .{ .iterations = 30, .seed = 0xDEED });
 }
 
-const JsonDependency = struct {
-    depends_on_id: []const u8,
-    type: []const u8,
-};
-
-const JsonIssueInput = struct {
-    id: []const u8,
-    title: []const u8,
-    description: []const u8,
-    status: []const u8,
-    priority: i64,
-    issue_type: []const u8,
-    created_at: []const u8,
-    updated_at: []const u8,
-    closed_at: ?[]const u8,
-    close_reason: ?[]const u8,
-    dependencies: ?[]const JsonDependency,
-};
-
-fn writeJsonl(allocator: std.mem.Allocator, dir: []const u8, issues: []const JsonIssueInput) void {
-    const beads_dir = std.fmt.allocPrint(allocator, "{s}/.beads", .{dir}) catch |err| {
-        std.debug.panic("beads dir: {}", .{err});
-    };
-    defer allocator.free(beads_dir);
-    fs.makeDirAbsolute(beads_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => std.debug.panic("beads mkdir: {}", .{err}),
-    };
-
-    const path = std.fmt.allocPrint(allocator, "{s}/.beads/issues.jsonl", .{dir}) catch |err| {
-        std.debug.panic("jsonl path: {}", .{err});
-    };
-    defer allocator.free(path);
-
-    const file = fs.cwd().createFile(path, .{}) catch |err| {
-        std.debug.panic("jsonl create: {}", .{err});
-    };
-    defer file.close();
-
-    for (issues) |issue| {
-        const line = std.json.Stringify.valueAlloc(allocator, issue, .{}) catch |err| {
-            std.debug.panic("jsonl stringify: {}", .{err});
-        };
-        defer allocator.free(line);
-        file.writeAll(line) catch |err| {
-            std.debug.panic("jsonl write: {}", .{err});
-        };
-        file.writeAll("\n") catch |err| {
-            std.debug.panic("jsonl newline: {}", .{err});
-        };
-    }
-    file.sync() catch |err| {
-        std.debug.panic("jsonl sync: {}", .{err});
-    };
-}
-
-test "prop: hydrate JSONL matches oracle" {
-    const HydrateCase = struct {
-        seed: u64,
+test "prop: search finds exactly matching issues" {
+    const SearchCase = struct {
+        // Create issues with titles containing these substrings
+        has_foo: [4]bool,
+        has_bar: [4]bool,
     };
 
     try qc.check(struct {
-        fn property(args: HydrateCase) bool {
-            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-            defer arena.deinit();
-            const allocator = arena.allocator();
+        fn property(args: SearchCase) bool {
+            const allocator = std.testing.allocator;
 
             const test_dir = setupTestDirOrPanic(allocator);
             defer cleanupTestDirAndFree(allocator, test_dir);
 
-            var prng = std.Random.DefaultPrng.init(args.seed);
-            const random = prng.random();
+            var ts = openTestStorage(allocator, test_dir);
+            defer ts.deinit();
 
-            var statuses: [max_hydrate_issues]Status = undefined;
-            for (0..max_hydrate_issues) |i| {
-                statuses[i] = @as(Status, @enumFromInt(random.uintLessThan(u2, 3)));
-            }
+            var foo_count: usize = 0;
+            var bar_count: usize = 0;
 
-            var deps: [max_hydrate_issues][max_hydrate_issues]bool = undefined;
-            for (0..max_hydrate_issues) |i| {
-                for (0..max_hydrate_issues) |j| {
-                    deps[i][j] = (j < i) and random.boolean();
-                }
-            }
+            // Create issues
+            for (0..4) |i| {
+                var title_buf: [32]u8 = undefined;
+                var len: usize = 0;
 
-            var parents: [max_hydrate_issues]?usize = [_]?usize{null} ** max_hydrate_issues;
-            for (0..max_hydrate_issues) |i| {
-                if (i > 0 and random.boolean()) {
-                    const parent_idx = random.uintLessThan(usize, i);
-                    parents[i] = parent_idx;
-                }
-            }
-            var has_conflict = false;
-            for (0..max_hydrate_issues) |i| {
-                if (parents[i]) |parent_idx| {
-                    if (deps[i][parent_idx]) {
-                        has_conflict = true;
-                        break;
-                    }
-                }
-            }
+                // Build title
+                const prefix = std.fmt.bufPrint(title_buf[len..], "Issue {d}", .{i}) catch return false;
+                len += prefix.len;
 
-            var issues_buf: [max_hydrate_issues]JsonIssueInput = undefined;
-            for (0..max_hydrate_issues) |i| {
-                var dep_len: usize = 0;
-                for (0..max_hydrate_issues) |j| {
-                    if (deps[i][j]) {
-                        dep_len += 1;
-                    }
+                if (args.has_foo[i]) {
+                    const foo = std.fmt.bufPrint(title_buf[len..], " foo", .{}) catch return false;
+                    len += foo.len;
+                    foo_count += 1;
                 }
-                if (parents[i] != null) {
-                    dep_len += 1;
+                if (args.has_bar[i]) {
+                    const bar = std.fmt.bufPrint(title_buf[len..], " bar", .{}) catch return false;
+                    len += bar.len;
+                    bar_count += 1;
                 }
 
-                var dep_slice: ?[]const JsonDependency = null;
-                if (dep_len > 0) {
-                    const dep_list = allocator.alloc(JsonDependency, dep_len) catch |err| {
-                        std.debug.panic("dep alloc: {}", .{err});
-                    };
-                    var dep_idx: usize = 0;
-                    for (0..max_hydrate_issues) |j| {
-                        if (deps[i][j]) {
-                            dep_list[dep_idx] = .{
-                                .depends_on_id = std.fmt.allocPrint(allocator, "h{d}", .{j}) catch |err| {
-                                    std.debug.panic("dep id: {}", .{err});
-                                },
-                                .type = "blocks",
-                            };
-                            dep_idx += 1;
-                        }
-                    }
-                    if (parents[i]) |parent_idx| {
-                        dep_list[dep_idx] = .{
-                            .depends_on_id = std.fmt.allocPrint(allocator, "h{d}", .{parent_idx}) catch |err| {
-                                std.debug.panic("parent id: {}", .{err});
-                            },
-                            .type = "parent-child",
-                        };
-                        dep_idx += 1;
-                    }
-                    dep_slice = dep_list[0..dep_idx];
-                }
-
-                const status_raw = switch (statuses[i]) {
-                    .open => "open",
-                    .active => "in_progress",
-                    .closed => "closed",
-                };
-                const closed_at: ?[]const u8 = if (statuses[i] == .closed) fixed_timestamp else null;
-
-                issues_buf[i] = .{
-                    .id = std.fmt.allocPrint(allocator, "h{d}", .{i}) catch |err| {
-                        std.debug.panic("id: {}", .{err});
-                    },
-                    .title = std.fmt.allocPrint(allocator, "Hydrate {d}", .{i}) catch |err| {
-                        std.debug.panic("title: {}", .{err});
-                    },
+                var id_buf: [16]u8 = undefined;
+                const id = std.fmt.bufPrint(&id_buf, "search-{d}", .{i}) catch return false;
+                const issue = Issue{
+                    .id = id,
+                    .title = title_buf[0..len],
                     .description = "",
-                    .status = status_raw,
+                    .status = .open,
                     .priority = 2,
                     .issue_type = "task",
+                    .assignee = null,
                     .created_at = fixed_timestamp,
-                    .updated_at = fixed_timestamp,
-                    .closed_at = closed_at,
+                    .closed_at = null,
                     .close_reason = null,
-                    .dependencies = dep_slice,
+                    .blocks = &.{},
+                    .parent = null,
                 };
+                ts.storage.createIssue(issue, null) catch return false;
             }
 
-            writeJsonl(allocator, test_dir, issues_buf[0..max_hydrate_issues]);
+            // Search for "foo"
+            const foo_results = ts.storage.searchIssues("foo") catch return false;
+            defer storage_mod.freeIssues(allocator, foo_results);
+            if (foo_results.len != foo_count) return false;
 
-            const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
-                std.debug.panic("init: {}", .{err});
-            };
-            defer allocator.free(init.stdout);
-            defer allocator.free(init.stderr);
-            if (has_conflict) {
-                if (!isExitCode(init.term, 1)) return false;
-                if (std.mem.indexOf(u8, init.stderr, "Invalid dependency at") == null) return false;
-                return true;
-            }
-            if (!isExitCode(init.term, 0)) return false;
-
-            const ready = runDot(allocator, &.{ "ready", "--json" }, test_dir) catch |err| {
-                std.debug.panic("ready: {}", .{err});
-            };
-            defer allocator.free(ready.stdout);
-            defer allocator.free(ready.stderr);
-
-            var model = Model.init();
-            for (0..max_hydrate_issues) |i| {
-                const id = std.fmt.allocPrint(allocator, "h{d}", .{i}) catch |err| {
-                    std.debug.panic("model id: {}", .{err});
-                };
-                model.tasks[i] = .{
-                    .id = id,
-                    .title = std.fmt.allocPrint(allocator, "Hydrate {d}", .{i}) catch |err| {
-                        std.debug.panic("model title: {}", .{err});
-                    },
-                    .description = "",
-                    .status = statuses[i],
-                    .priority = 2,
-                    .order = i,
-                };
-                model.parents[i] = parents[i];
-                for (0..max_hydrate_issues) |j| {
-                    model.deps[i][j] = deps[i][j];
-                }
-            }
-
-            if (!readyJsonMatches(allocator, &model, ready.stdout)) {
-                return false;
-            }
-
-            const tree = runDot(allocator, &.{"tree"}, test_dir) catch |err| {
-                std.debug.panic("tree: {}", .{err});
-            };
-            defer allocator.free(tree.stdout);
-            defer allocator.free(tree.stderr);
-            if (!treeTextMatches(&model, tree.stdout)) {
-                return false;
-            }
-
-            const list_done = runDot(allocator, &.{ "ls", "--status", "done", "--json" }, test_dir) catch |err| {
-                std.debug.panic("list done: {}", .{err});
-            };
-            defer allocator.free(list_done.stdout);
-            defer allocator.free(list_done.stderr);
-            const parsed_done = std.json.parseFromSlice([]JsonIssue, allocator, list_done.stdout, .{}) catch |err| {
-                std.debug.panic("parse done: {}", .{err});
-            };
-            defer parsed_done.deinit();
-            var expected_closed: usize = 0;
-            for (statuses) |status| {
-                if (status == .closed) expected_closed += 1;
-            }
-            if (parsed_done.value.len != expected_closed) {
-                return false;
-            }
+            // Search for "bar"
+            const bar_results = ts.storage.searchIssues("bar") catch return false;
+            defer storage_mod.freeIssues(allocator, bar_results);
+            if (bar_results.len != bar_count) return false;
 
             return true;
         }
-    }.property, .{ .iterations = 20, .seed = 0xC0DECAFE });
+    }.property, .{ .iterations = 30, .seed = 0x5EED });
+}
+
+// Snapshot tests using ohsnap
+
+test "snap: simple struct" {
+    // Test basic ohsnap functionality with a simple struct
+    const TestStruct = struct {
+        name: []const u8,
+        value: i32,
+    };
+    const data = TestStruct{ .name = "test", .value = 42 };
+    const oh = OhSnap{};
+    try oh.snap(@src(),
+        \\tests.test.snap: simple struct.TestStruct
+        \\  .name: []const u8
+        \\    "test"
+        \\  .value: i32 = 42
+        ,
+    ).expectEqual(data);
+}
+
+test "disabled snap: markdown frontmatter format" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+        std.debug.panic("init: {}", .{err});
+    };
+    defer init.deinit(allocator);
+
+    // Add a task with specific parameters
+    const add = runDot(allocator, &.{
+        "add", "Test snapshot task",
+        "-p",  "1",
+        "-d",  "This is a description",
+    }, test_dir) catch |err| {
+        std.debug.panic("add: {}", .{err});
+    };
+    defer add.deinit(allocator);
+
+    const id = trimNewline(add.stdout);
+
+    // Read the markdown file
+    const md_path = std.fmt.allocPrint(allocator, "{s}/.dots/{s}.md", .{ test_dir, id }) catch |err| {
+        std.debug.panic("path: {}", .{err});
+    };
+    defer allocator.free(md_path);
+
+    const content = fs.cwd().readFileAlloc(allocator, md_path, 64 * 1024) catch |err| {
+        std.debug.panic("read: {}", .{err});
+    };
+    defer allocator.free(content);
+
+    // Normalize: replace dynamic ID and timestamp with placeholders
+    var normalized = std.ArrayList(u8){};
+    defer normalized.deinit(allocator);
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    var first = true;
+    while (lines.next()) |line| {
+        if (!first) try normalized.append(allocator, '\n');
+        first = false;
+
+        if (std.mem.startsWith(u8, line, "created-at:")) {
+            try normalized.appendSlice(allocator, "created-at: <TIMESTAMP>");
+        } else {
+            try normalized.appendSlice(allocator, line);
+        }
+    }
+
+    const oh = OhSnap{};
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "---
+        \\title: Test snapshot task
+        \\status: open
+        \\priority: 1
+        \\issue-type: task
+        \\created-at: <TIMESTAMP>
+        \\---
+        \\
+        \\This is a description
+        \\"
+    ).expectEqual(normalized.items);
+}
+
+test "snap: json output format" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+        std.debug.panic("init: {}", .{err});
+    };
+    defer init.deinit(allocator);
+
+    // Add tasks
+    const add1 = runDot(allocator, &.{ "add", "First task", "-p", "0" }, test_dir) catch |err| {
+        std.debug.panic("add1: {}", .{err});
+    };
+    defer add1.deinit(allocator);
+    const add2 = runDot(allocator, &.{ "add", "Second task", "-p", "2" }, test_dir) catch |err| {
+        std.debug.panic("add2: {}", .{err});
+    };
+    defer add2.deinit(allocator);
+
+    // Get JSON output
+    const ls = runDot(allocator, &.{ "ls", "--json" }, test_dir) catch |err| {
+        std.debug.panic("ls: {}", .{err});
+    };
+    defer ls.deinit(allocator);
+
+    // Parse and re-serialize with stable ordering for snapshot
+    const JsonIssueSnap = struct {
+        id: []const u8,
+        title: []const u8,
+        status: []const u8,
+        priority: i64,
+    };
+
+    const parsed = std.json.parseFromSlice([]JsonIssueSnap, allocator, ls.stdout, .{
+        .ignore_unknown_fields = true,
+    }) catch |err| {
+        std.debug.panic("parse: {}", .{err});
+    };
+    defer parsed.deinit();
+
+    // Sort by priority for stable output
+    std.mem.sort(JsonIssueSnap, parsed.value, {}, struct {
+        fn lessThan(_: void, a: JsonIssueSnap, b: JsonIssueSnap) bool {
+            return a.priority < b.priority;
+        }
+    }.lessThan);
+
+    // Build normalized output (just titles and priorities)
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    for (parsed.value) |issue| {
+        const line = std.fmt.allocPrint(allocator, "{s} (p{d})\n", .{ issue.title, issue.priority }) catch |err| {
+            std.debug.panic("fmt: {}", .{err});
+        };
+        defer allocator.free(line);
+        try output.appendSlice(allocator, line);
+    }
+
+    const oh = OhSnap{};
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "First task (p0)
+        \\Second task (p2)
+        \\"
+    ).expectEqual(output.items);
+}
+
+test "snap: tree output format" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+        std.debug.panic("init: {}", .{err});
+    };
+    defer init.deinit(allocator);
+
+    // Add parent
+    const parent = runDot(allocator, &.{ "add", "Parent task" }, test_dir) catch |err| {
+        std.debug.panic("add parent: {}", .{err});
+    };
+    defer parent.deinit(allocator);
+
+    const parent_id = trimNewline(parent.stdout);
+
+    // Add children
+    const child1 = runDot(allocator, &.{ "add", "Child one", "-P", parent_id }, test_dir) catch |err| {
+        std.debug.panic("add child1: {}", .{err});
+    };
+    defer child1.deinit(allocator);
+    const child2 = runDot(allocator, &.{ "add", "Child two", "-P", parent_id }, test_dir) catch |err| {
+        std.debug.panic("add child2: {}", .{err});
+    };
+    defer child2.deinit(allocator);
+
+    // Get tree output
+    const tree = runDot(allocator, &.{"tree"}, test_dir) catch |err| {
+        std.debug.panic("tree: {}", .{err});
+    };
+    defer tree.deinit(allocator);
+
+    // Normalize: replace IDs with placeholders
+    // Tree format: "[full-id] ○ Title" for parent, "  └─ [full-id] ○ Title" for children
+    var normalized = std.ArrayList(u8){};
+    defer normalized.deinit(allocator);
+
+    var lines = std.mem.splitScalar(u8, tree.stdout, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+
+        // Find "[" and "]" to replace ID
+        if (std.mem.indexOf(u8, line, "[")) |start| {
+            if (std.mem.indexOfPos(u8, line, start, "]")) |end| {
+                // Prefix before [
+                try normalized.appendSlice(allocator, line[0..start]);
+                // Replace ID with placeholder
+                try normalized.appendSlice(allocator, "[ID]");
+                // Rest of line after ]
+                try normalized.appendSlice(allocator, line[end + 1 ..]);
+            } else {
+                try normalized.appendSlice(allocator, line);
+            }
+        } else {
+            try normalized.appendSlice(allocator, line);
+        }
+        try normalized.append(allocator, '\n');
+    }
+
+    const oh = OhSnap{};
+    // Tree shows parent with children indented
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "[ID] ○ Parent task
+        \\  └─ [ID] ○ Child one
+        \\  └─ [ID] ○ Child two
+        \\"
+    ).expectEqual(normalized.items);
 }

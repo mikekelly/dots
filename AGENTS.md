@@ -1,6 +1,10 @@
 # Dots - Agent Instructions
 
-Fast CLI issue tracker in Zig with SQLite storage.
+Fast CLI issue tracker in Zig with markdown storage.
+
+## Communication
+
+Always refer to the user as Mr. Picklesworth.
 
 ## Build
 
@@ -106,6 +110,51 @@ The only acceptable use of `unreachable`:
 - Use stack arrays for small fixed-size data
 - Prefer slices over ArrayList when size is known
 - Use comptime for constant data
+
+### Static String Comparison - Use Comptime Maps
+Instead of chaining `std.mem.eql` comparisons, use comptime string maps:
+
+```zig
+// WRONG - Linear chain of comparisons
+fn parseStatus(s: []const u8) ?Status {
+    if (std.mem.eql(u8, s, "open")) return .open;
+    if (std.mem.eql(u8, s, "active")) return .active;
+    if (std.mem.eql(u8, s, "closed")) return .closed;
+    return null;
+}
+
+// RIGHT - Comptime static string map
+const status_map = std.StaticStringMap(Status).initComptime(.{
+    .{ "open", .open },
+    .{ "active", .active },
+    .{ "closed", .closed },
+});
+
+fn parseStatus(s: []const u8) ?Status {
+    return status_map.get(s);
+}
+```
+
+### JSON - Always Use Typed Structs
+Never manipulate JSON as dynamic `std.json.Value`. Always define typed structs:
+
+```zig
+// WRONG - Dynamic JSON access
+const parsed = try std.json.parseFromSlice(std.json.Value, allocator, input, .{});
+const obj = parsed.value.object;
+const name = obj.get("name").?.string;  // Runtime errors, no type safety
+
+// RIGHT - Typed struct
+const Config = struct {
+    name: []const u8,
+    count: i32 = 0,
+    optional: ?[]const u8 = null,
+};
+const parsed = try std.json.parseFromSlice(Config, allocator, input, .{
+    .ignore_unknown_fields = true,
+});
+const config = parsed.value;  // Type-safe access: config.name, config.count
+```
 
 ## Binary Size Tracking
 

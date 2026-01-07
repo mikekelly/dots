@@ -1,18 +1,20 @@
 const std = @import("std");
 const fs = std.fs;
 const Allocator = std.mem.Allocator;
-const sqlite = @import("sqlite.zig");
+const storage_mod = @import("storage.zig");
 const build_options = @import("build_options");
-const status_util = @import("util/status.zig");
 const mapping_util = @import("util/mapping.zig");
 
 const libc = @cImport({
     @cInclude("time.h");
 });
 
-const BEADS_DIR = ".beads";
-const BEADS_DB = ".beads/beads.db";
-const BEADS_JSONL = ".beads/issues.jsonl";
+const Storage = storage_mod.Storage;
+const Issue = storage_mod.Issue;
+const Status = storage_mod.Status;
+
+const DOTS_DIR = ".dots";
+const MAPPING_FILE = ".dots/todo-mapping.json";
 const max_hook_input_bytes = 1024 * 1024;
 const max_mapping_bytes = 1024 * 1024;
 const default_priority: i64 = 2;
@@ -31,8 +33,9 @@ const commands = [_]Command{
     .{ .names = &.{"ready"}, .handler = cmdReady },
     .{ .names = &.{"tree"}, .handler = cmdTree },
     .{ .names = &.{"find"}, .handler = cmdFind },
-    .{ .names = &.{"update"}, .handler = cmdBeadsUpdate },
-    .{ .names = &.{"close"}, .handler = cmdBeadsClose },
+    .{ .names = &.{"update"}, .handler = cmdUpdate },
+    .{ .names = &.{"close"}, .handler = cmdClose },
+    .{ .names = &.{"purge"}, .handler = cmdPurge },
     .{ .names = &.{"hook"}, .handler = cmdHook },
     .{ .names = &.{"init"}, .handler = cmdInitWrapper },
     .{ .names = &.{ "help", "--help", "-h" }, .handler = cmdHelp },
@@ -73,8 +76,8 @@ pub fn main() !void {
     }
 }
 
-fn cmdInitWrapper(allocator: Allocator, _: []const []const u8) !void {
-    return cmdInit(allocator);
+fn cmdInitWrapper(allocator: Allocator, args: []const []const u8) !void {
+    return cmdInit(allocator, args);
 }
 
 fn cmdHelp(_: Allocator, _: []const []const u8) !void {
@@ -85,17 +88,8 @@ fn cmdVersion(_: Allocator, _: []const []const u8) !void {
     return stdout().print("dots {s} ({s})\n", .{ build_options.version, build_options.git_hash });
 }
 
-fn openStorage(allocator: Allocator) !sqlite.Storage {
-    // Auto-create .beads/ directory
-    fs.cwd().makeDir(BEADS_DIR) catch |err| switch (err) {
-        error.PathAlreadyExists => {
-            // Verify it's actually a directory
-            const stat = fs.cwd().statFile(BEADS_DIR) catch return err;
-            if (stat.kind != .directory) fatal("{s} exists but is not a directory\n", .{BEADS_DIR});
-        },
-        else => return err,
-    };
-    return sqlite.Storage.open(allocator, BEADS_DB);
+fn openStorage(allocator: Allocator) !Storage {
+    return Storage.open(allocator);
 }
 
 // I/O helpers
@@ -114,35 +108,18 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
     std.process.exit(1);
 }
 
-// Status helpers
-const StatusKind = status_util.StatusKind;
-
-fn statusKindOrFatal(status_str: []const u8) StatusKind {
-    return status_util.parse(status_str) orelse fatal("Invalid status: {s}\n", .{status_str});
+// ID resolution helper - resolves short ID or exits with error
+fn resolveIdOrFatal(storage: *storage_mod.Storage, id: []const u8) []const u8 {
+    return storage.resolveId(id) catch |err| switch (err) {
+        error.IssueNotFound => fatal("Issue not found: {s}\n", .{id}),
+        error.AmbiguousId => fatal("Ambiguous ID: {s}\n", .{id}),
+        else => fatal("Error resolving ID: {s}\n", .{id}),
+    };
 }
 
-fn statusToString(kind: StatusKind) []const u8 {
-    return status_util.toString(kind);
-}
-
-fn parseStatusArg(status: []const u8) []const u8 {
-    return statusToString(statusKindOrFatal(status));
-}
-
-fn statusChar(status: []const u8) u8 {
-    return status_util.char(statusKindOrFatal(status));
-}
-
-fn statusSym(status: []const u8) []const u8 {
-    return status_util.symbol(statusKindOrFatal(status));
-}
-
-fn displayStatus(status: []const u8) []const u8 {
-    return status_util.display(statusKindOrFatal(status));
-}
-
-fn isClosedStatus(status: []const u8) bool {
-    return statusKindOrFatal(status) == .closed;
+// Status parsing helper
+fn parseStatusArg(status_str: []const u8) Status {
+    return Status.parse(status_str) orelse fatal("Invalid status: {s}\n", .{status_str});
 }
 
 // Arg parsing helper
@@ -177,38 +154,40 @@ const USAGE =
     \\  dot ready [--json]           Show unblocked dots
     \\  dot tree                     Show hierarchy
     \\  dot find "query"             Search dots
-    \\  dot init                     Initialize .beads directory
+    \\  dot purge                    Delete archived dots
+    \\  dot init                     Initialize .dots directory
     \\
     \\Examples:
     \\  dot "Fix the bug"
     \\  dot add "Design API" -p 1 -d "REST endpoints"
-    \\  dot add "Implement" -P bd-1 -a bd-2
-    \\  dot on bd-3
-    \\  dot off bd-3 -r "shipped"
+    \\  dot add "Implement" -P dots-1 -a dots-2
+    \\  dot on dots-3
+    \\  dot off dots-3 -r "shipped"
     \\
 ;
 
-fn cmdInit(allocator: Allocator) !void {
-    fs.cwd().makeDir(BEADS_DIR) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-
-    const jsonl_exists = blk: {
-        fs.cwd().access(BEADS_JSONL, .{}) catch |err| switch (err) {
-            error.FileNotFound => break :blk false,
-            else => return err,
-        };
-        break :blk true;
-    };
-
+fn cmdInit(allocator: Allocator, args: []const []const u8) !void {
     var storage = try openStorage(allocator);
     defer storage.close();
 
-    if (jsonl_exists) {
-        const count = try sqlite.hydrateFromJsonl(&storage, allocator, BEADS_JSONL);
-        if (count > 0) try stdout().print("Hydrated {d} issues from {s}\n", .{ count, BEADS_JSONL });
+    // Handle --from-jsonl flag for migration
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (getArg(args, &i, "--from-jsonl")) |jsonl_path| {
+            const count = try hydrateFromJsonl(allocator, &storage, jsonl_path);
+            if (count > 0) try stdout().print("Imported {d} issues from {s}\n", .{ count, jsonl_path });
+        }
     }
+
+    // Add .dots to git if in a git repo
+    fs.cwd().access(".git", .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+
+    // Run git add .dots
+    var child = std.process.Child.init(&.{ "git", "add", DOTS_DIR }, allocator);
+    _ = try child.spawnAndWait();
 }
 
 fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
@@ -243,32 +222,57 @@ fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
     var storage = try openStorage(allocator);
     defer storage.close();
 
-    const prefix = try getOrCreatePrefix(allocator, &storage);
+    const prefix = try storage_mod.getOrCreatePrefix(allocator, &storage);
     defer allocator.free(prefix);
 
-    const id = try generateId(allocator, prefix);
+    const id = try storage_mod.generateId(allocator, prefix);
     defer allocator.free(id);
 
     var ts_buf: [40]u8 = undefined;
     const now = try formatTimestamp(&ts_buf);
 
-    const issue = sqlite.Issue{
+    // Handle after dependency (blocks)
+    var blocks: []const []const u8 = &.{};
+    var blocks_buf: [1][]const u8 = undefined;
+    var resolved_after: ?[]const u8 = null;
+    if (after) |after_id| {
+        // Resolve short ID if needed
+        resolved_after = storage.resolveId(after_id) catch |err| switch (err) {
+            error.IssueNotFound => fatal("After issue not found: {s}\n", .{after_id}),
+            error.AmbiguousId => fatal("Ambiguous ID: {s}\n", .{after_id}),
+            else => return err,
+        };
+        blocks_buf[0] = resolved_after.?;
+        blocks = &blocks_buf;
+    }
+    defer if (resolved_after) |r| allocator.free(r);
+
+    // Resolve parent ID if provided
+    var resolved_parent: ?[]const u8 = null;
+    if (parent) |parent_id| {
+        resolved_parent = storage.resolveId(parent_id) catch |err| switch (err) {
+            error.IssueNotFound => fatal("Parent issue not found: {s}\n", .{parent_id}),
+            error.AmbiguousId => fatal("Ambiguous ID: {s}\n", .{parent_id}),
+            else => return err,
+        };
+    }
+    defer if (resolved_parent) |p| allocator.free(p);
+
+    const issue = Issue{
         .id = id,
         .title = title,
         .description = description,
-        .status = "open",
+        .status = .open,
         .priority = priority,
         .issue_type = "task",
         .assignee = null,
         .created_at = now,
-        .updated_at = now,
         .closed_at = null,
         .close_reason = null,
-        .after = after,
-        .parent = parent,
+        .blocks = blocks,
     };
 
-    storage.createIssue(issue) catch |err| switch (err) {
+    storage.createIssue(issue, resolved_parent) catch |err| switch (err) {
         error.DependencyNotFound => fatal("Parent or after issue not found\n", .{}),
         error.DependencyCycle => fatal("Dependency would create a cycle\n", .{}),
         else => return err,
@@ -284,7 +288,7 @@ fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
 }
 
 fn cmdList(allocator: Allocator, args: []const []const u8) !void {
-    var filter_status: ?[]const u8 = null;
+    var filter_status: ?Status = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (getArg(args, &i, "--status")) |v| filter_status = parseStatusArg(v);
@@ -294,7 +298,7 @@ fn cmdList(allocator: Allocator, args: []const []const u8) !void {
     defer storage.close();
 
     const issues = try storage.listIssues(filter_status);
-    defer sqlite.freeIssues(allocator, issues);
+    defer storage_mod.freeIssues(allocator, issues);
 
     try writeIssueList(issues, filter_status == null, hasFlag(args, "--json"));
 }
@@ -304,18 +308,18 @@ fn cmdReady(allocator: Allocator, args: []const []const u8) !void {
     defer storage.close();
 
     const issues = try storage.getReadyIssues();
-    defer sqlite.freeIssues(allocator, issues);
+    defer storage_mod.freeIssues(allocator, issues);
 
     try writeIssueList(issues, false, hasFlag(args, "--json"));
 }
 
-fn writeIssueList(issues: []const sqlite.Issue, skip_done: bool, use_json: bool) !void {
+fn writeIssueList(issues: []const Issue, skip_done: bool, use_json: bool) !void {
     const w = stdout();
     if (use_json) {
         try w.writeByte('[');
         var first = true;
         for (issues) |issue| {
-            if (skip_done and isClosedStatus(issue.status)) continue;
+            if (skip_done and issue.status == .closed) continue;
             if (!first) try w.writeByte(',');
             first = false;
             try writeIssueJson(issue, w);
@@ -323,8 +327,8 @@ fn writeIssueList(issues: []const sqlite.Issue, skip_done: bool, use_json: bool)
         try w.writeAll("]\n");
     } else {
         for (issues) |issue| {
-            if (skip_done and isClosedStatus(issue.status)) continue;
-            try w.print("[{s}] {c} {s}\n", .{ issue.id, statusChar(issue.status), issue.title });
+            if (skip_done and issue.status == .closed) continue;
+            try w.print("[{s}] {c} {s}\n", .{ issue.id, issue.status.char(), issue.title });
         }
     }
 }
@@ -335,16 +339,19 @@ fn cmdOn(allocator: Allocator, args: []const []const u8) !void {
     var storage = try openStorage(allocator);
     defer storage.close();
 
-    // Validate all IDs exist before any mutations
-    for (args) |id| {
-        if (!try storage.issueExists(id)) fatal("Issue not found: {s}\n", .{id});
+    // Resolve and validate all IDs first
+    var resolved_ids: std.ArrayList([]const u8) = .{};
+    defer {
+        for (resolved_ids.items) |id| allocator.free(id);
+        resolved_ids.deinit(allocator);
     }
 
-    var ts_buf: [40]u8 = undefined;
-    const now = try formatTimestamp(&ts_buf);
-
     for (args) |id| {
-        try storage.updateStatus(id, "active", now, null, null);
+        try resolved_ids.append(allocator, resolveIdOrFatal(&storage, id));
+    }
+
+    for (resolved_ids.items) |id| {
+        try storage.updateStatus(id, .active, null, null);
     }
 }
 
@@ -369,16 +376,25 @@ fn cmdOff(allocator: Allocator, args: []const []const u8) !void {
     var storage = try openStorage(allocator);
     defer storage.close();
 
-    // Validate all IDs exist before any mutations
+    // Resolve and validate all IDs first
+    var resolved_ids: std.ArrayList([]const u8) = .{};
+    defer {
+        for (resolved_ids.items) |id| allocator.free(id);
+        resolved_ids.deinit(allocator);
+    }
+
     for (ids.items) |id| {
-        if (!try storage.issueExists(id)) fatal("Issue not found: {s}\n", .{id});
+        try resolved_ids.append(allocator, resolveIdOrFatal(&storage, id));
     }
 
     var ts_buf: [40]u8 = undefined;
     const now = try formatTimestamp(&ts_buf);
 
-    for (ids.items) |id| {
-        try storage.updateStatus(id, "closed", now, now, reason);
+    for (resolved_ids.items) |id| {
+        storage.updateStatus(id, .closed, now, reason) catch |err| switch (err) {
+            error.ChildrenNotClosed => fatal("Cannot close {s}: children are not all closed\n", .{id}),
+            else => return err,
+        };
     }
 }
 
@@ -388,12 +404,18 @@ fn cmdRm(allocator: Allocator, args: []const []const u8) !void {
     var storage = try openStorage(allocator);
     defer storage.close();
 
-    // Validate all IDs exist before any mutations
-    for (args) |id| {
-        if (!try storage.issueExists(id)) fatal("Issue not found: {s}\n", .{id});
+    // Resolve and validate all IDs first
+    var resolved_ids: std.ArrayList([]const u8) = .{};
+    defer {
+        for (resolved_ids.items) |id| allocator.free(id);
+        resolved_ids.deinit(allocator);
     }
 
     for (args) |id| {
+        try resolved_ids.append(allocator, resolveIdOrFatal(&storage, id));
+    }
+
+    for (resolved_ids.items) |id| {
         try storage.deleteIssue(id);
     }
 }
@@ -404,38 +426,44 @@ fn cmdShow(allocator: Allocator, args: []const []const u8) !void {
     var storage = try openStorage(allocator);
     defer storage.close();
 
-    const iss = try storage.getIssue(args[0]) orelse fatal("Issue not found: {s}\n", .{args[0]});
+    const resolved = resolveIdOrFatal(&storage, args[0]);
+    defer allocator.free(resolved);
+
+    const iss = try storage.getIssue(resolved) orelse fatal("Issue not found: {s}\n", .{args[0]});
     defer iss.deinit(allocator);
 
     const w = stdout();
-    try w.print("ID:       {s}\nTitle:    {s}\nStatus:   {s}\nPriority: {d}\n", .{ iss.id, iss.title, displayStatus(iss.status), iss.priority });
+    try w.print("ID:       {s}\nTitle:    {s}\nStatus:   {s}\nPriority: {d}\n", .{
+        iss.id,
+        iss.title,
+        iss.status.display(),
+        iss.priority,
+    });
     if (iss.description.len > 0) try w.print("Desc:     {s}\n", .{iss.description});
     try w.print("Created:  {s}\n", .{iss.created_at});
     if (iss.closed_at) |ca| try w.print("Closed:   {s}\n", .{ca});
     if (iss.close_reason) |r| try w.print("Reason:   {s}\n", .{r});
 }
 
-fn cmdTree(allocator: Allocator, args: []const []const u8) !void {
-    _ = args;
-
+fn cmdTree(allocator: Allocator, _: []const []const u8) !void {
     var storage = try openStorage(allocator);
     defer storage.close();
 
     const roots = try storage.getRootIssues();
-    defer sqlite.freeIssues(allocator, roots);
+    defer storage_mod.freeIssues(allocator, roots);
 
     const w = stdout();
     for (roots) |root| {
-        try w.print("[{s}] {s} {s}\n", .{ root.id, statusSym(root.status), root.title });
+        try w.print("[{s}] {s} {s}\n", .{ root.id, root.status.symbol(), root.title });
 
         const children = try storage.getChildren(root.id);
-        defer sqlite.freeChildIssues(allocator, children);
+        defer storage_mod.freeChildIssues(allocator, children);
 
         for (children) |child| {
             const blocked_msg: []const u8 = if (child.blocked) " (blocked)" else "";
             try w.print(
                 "  └─ [{s}] {s} {s}{s}\n",
-                .{ child.issue.id, statusSym(child.issue.status), child.issue.title, blocked_msg },
+                .{ child.issue.id, child.issue.status.symbol(), child.issue.title, blocked_msg },
             );
         }
     }
@@ -448,18 +476,18 @@ fn cmdFind(allocator: Allocator, args: []const []const u8) !void {
     defer storage.close();
 
     const issues = try storage.searchIssues(args[0]);
-    defer sqlite.freeIssues(allocator, issues);
+    defer storage_mod.freeIssues(allocator, issues);
 
     const w = stdout();
     for (issues) |issue| {
-        try w.print("[{s}] {c} {s}\n", .{ issue.id, statusChar(issue.status), issue.title });
+        try w.print("[{s}] {c} {s}\n", .{ issue.id, issue.status.char(), issue.title });
     }
 }
 
-fn cmdBeadsUpdate(allocator: Allocator, args: []const []const u8) !void {
+fn cmdUpdate(allocator: Allocator, args: []const []const u8) !void {
     if (args.len == 0) fatal("Usage: dot update <id> [--status S]\n", .{});
 
-    var new_status: ?[]const u8 = null;
+    var new_status: ?Status = null;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (getArg(args, &i, "--status")) |v| new_status = parseStatusArg(v);
@@ -467,20 +495,22 @@ fn cmdBeadsUpdate(allocator: Allocator, args: []const []const u8) !void {
 
     const status = new_status orelse fatal("--status required\n", .{});
 
-    var ts_buf: [40]u8 = undefined;
-    const now = try formatTimestamp(&ts_buf);
-
     var storage = try openStorage(allocator);
     defer storage.close();
 
-    const closed_at: ?[]const u8 = if (std.mem.eql(u8, status, "closed")) now else null;
-    storage.updateStatus(args[0], status, now, closed_at, null) catch |err| switch (err) {
-        error.IssueNotFound => fatal("Issue not found: {s}\n", .{args[0]}),
+    const resolved = resolveIdOrFatal(&storage, args[0]);
+    defer allocator.free(resolved);
+
+    var ts_buf: [40]u8 = undefined;
+    const closed_at: ?[]const u8 = if (status == .closed) try formatTimestamp(&ts_buf) else null;
+
+    storage.updateStatus(resolved, status, closed_at, null) catch |err| switch (err) {
+        error.ChildrenNotClosed => fatal("Cannot close: children are not all closed\n", .{}),
         else => return err,
     };
 }
 
-fn cmdBeadsClose(allocator: Allocator, args: []const []const u8) !void {
+fn cmdClose(allocator: Allocator, args: []const []const u8) !void {
     if (args.len == 0) fatal("Usage: dot close <id> [--reason R]\n", .{});
 
     var reason: ?[]const u8 = null;
@@ -489,47 +519,27 @@ fn cmdBeadsClose(allocator: Allocator, args: []const []const u8) !void {
         if (getArg(args, &i, "--reason")) |v| reason = v;
     }
 
-    var ts_buf: [40]u8 = undefined;
-    const now = try formatTimestamp(&ts_buf);
-
     var storage = try openStorage(allocator);
     defer storage.close();
 
-    storage.updateStatus(args[0], "closed", now, now, reason) catch |err| switch (err) {
-        error.IssueNotFound => fatal("Issue not found: {s}\n", .{args[0]}),
+    const resolved = resolveIdOrFatal(&storage, args[0]);
+    defer allocator.free(resolved);
+
+    var ts_buf: [40]u8 = undefined;
+    const now = try formatTimestamp(&ts_buf);
+
+    storage.updateStatus(resolved, .closed, now, reason) catch |err| switch (err) {
+        error.ChildrenNotClosed => fatal("Cannot close: children are not all closed\n", .{}),
         else => return err,
     };
 }
 
-fn generateId(allocator: Allocator, prefix: []const u8) ![]u8 {
-    // Use microseconds (48-bit) + random (16-bit) for collision resistance
-    const ts = std.time.microTimestamp();
-    if (ts < 0) return error.InvalidTimestamp;
-    const micros: u48 = @truncate(@as(u64, @intCast(ts)));
-    const rand: u16 = std.crypto.random.int(u16);
-    return std.fmt.allocPrint(allocator, "{s}-{x}{x:0>4}", .{ prefix, micros, rand });
-}
+fn cmdPurge(allocator: Allocator, _: []const []const u8) !void {
+    var storage = try openStorage(allocator);
+    defer storage.close();
 
-fn getOrCreatePrefix(allocator: Allocator, storage: *sqlite.Storage) ![]const u8 {
-    // Try to get prefix from database config
-    if (try storage.getConfig("issue_prefix")) |prefix| {
-        return prefix;
-    }
-
-    // Auto-detect from directory name (like beads does)
-    const cwd = std.fs.cwd();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try cwd.realpath(".", &path_buf);
-    const basename = std.fs.path.basename(path);
-
-    // Strip trailing hyphens like beads does
-    var prefix = std.mem.trimRight(u8, basename, "-");
-    if (prefix.len == 0) prefix = "dot";
-
-    // Store it in config for future use
-    try storage.setConfig("issue_prefix", prefix);
-
-    return allocator.dupe(u8, prefix);
+    try storage.purgeArchive();
+    try stdout().writeAll("Archive purged\n");
 }
 
 fn formatTimestamp(buf: []u8) ![]const u8 {
@@ -570,21 +580,19 @@ const JsonIssue = struct {
     priority: i64,
     issue_type: []const u8,
     created_at: []const u8,
-    updated_at: []const u8,
     closed_at: ?[]const u8 = null,
     close_reason: ?[]const u8 = null,
 };
 
-fn writeIssueJson(issue: sqlite.Issue, w: *std.Io.Writer) !void {
+fn writeIssueJson(issue: Issue, w: *std.Io.Writer) !void {
     const json_issue = JsonIssue{
         .id = issue.id,
         .title = issue.title,
         .description = if (issue.description.len > 0) issue.description else null,
-        .status = displayStatus(issue.status),
+        .status = issue.status.display(),
         .priority = issue.priority,
         .issue_type = issue.issue_type,
         .created_at = issue.created_at,
-        .updated_at = issue.updated_at,
         .closed_at = issue.closed_at,
         .close_reason = issue.close_reason,
     };
@@ -595,18 +603,18 @@ fn writeIssueJson(issue: sqlite.Issue, w: *std.Io.Writer) !void {
 fn cmdHook(allocator: Allocator, args: []const []const u8) !void {
     if (args.len == 0) fatal("Usage: dot hook <session|sync>\n", .{});
 
-    if (std.mem.eql(u8, args[0], "session")) {
-        try hookSession(allocator);
-    } else if (std.mem.eql(u8, args[0], "sync")) {
-        try hookSync(allocator);
-    } else {
-        fatal("Unknown hook: {s}\n", .{args[0]});
-    }
+    const hook_map = std.StaticStringMap(*const fn (Allocator) anyerror!void).initComptime(.{
+        .{ "session", hookSession },
+        .{ "sync", hookSync },
+    });
+
+    const handler = hook_map.get(args[0]) orelse fatal("Unknown hook: {s}\n", .{args[0]});
+    try handler(allocator);
 }
 
 fn hookSession(allocator: Allocator) !void {
-    // Check if .beads exists
-    fs.cwd().access(BEADS_DIR, .{}) catch |err| switch (err) {
+    // Check if .dots exists
+    fs.cwd().access(DOTS_DIR, .{}) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
@@ -614,11 +622,11 @@ fn hookSession(allocator: Allocator) !void {
     var storage = try openStorage(allocator);
     defer storage.close();
 
-    const active = try storage.listIssues("active");
-    defer sqlite.freeIssues(allocator, active);
+    const active = try storage.listIssues(.active);
+    defer storage_mod.freeIssues(allocator, active);
 
     const ready = try storage.getReadyIssues();
-    defer sqlite.freeIssues(allocator, ready);
+    defer storage_mod.freeIssues(allocator, ready);
 
     if (active.len == 0 and ready.len == 0) return;
 
@@ -634,7 +642,6 @@ fn hookSession(allocator: Allocator) !void {
     }
 }
 
-const MAPPING_FILE = ".beads/todo-mapping.json";
 const Mapping = mapping_util.Mapping;
 
 const HookEnvelope = struct {
@@ -678,8 +685,14 @@ fn parseJsonValueOrError(
     };
 }
 
+const hook_status_map = std.StaticStringMap(void).initComptime(.{
+    .{ "pending", {} },
+    .{ "in_progress", {} },
+    .{ "completed", {} },
+});
+
 fn validateHookStatus(status: []const u8) bool {
-    return std.mem.eql(u8, status, "pending") or std.mem.eql(u8, status, "in_progress") or std.mem.eql(u8, status, "completed");
+    return hook_status_map.has(status);
 }
 
 fn hookSync(allocator: Allocator) !void {
@@ -688,7 +701,7 @@ fn hookSync(allocator: Allocator) !void {
     defer allocator.free(input);
     if (input.len == 0) return error.EmptyHookInput;
 
-    // Parse JSON (ignore_unknown_fields for forward compatibility with Claude Code)
+    // Parse JSON
     const parsed = try parseJsonSliceOrError(
         HookEnvelope,
         allocator,
@@ -711,23 +724,17 @@ fn hookSync(allocator: Allocator) !void {
     defer parsed_input.deinit();
     const todos = parsed_input.value.todos;
 
-    // Validate all todos before any DB operations
+    // Validate all todos before any operations
     for (todos) |todo| {
         if (todo.content.len == 0) return error.InvalidHookInput;
         if (!validateHookStatus(todo.status)) return error.InvalidHookInput;
     }
 
-    // Ensure .beads exists
-    fs.cwd().makeDir(BEADS_DIR) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-
     var storage = try openStorage(allocator);
     defer storage.close();
 
     // Get prefix for ID generation
-    const prefix = try getOrCreatePrefix(allocator, &storage);
+    const prefix = try storage_mod.getOrCreatePrefix(allocator, &storage);
     defer allocator.free(prefix);
 
     // Load mapping
@@ -737,51 +744,45 @@ fn hookSync(allocator: Allocator) !void {
     var ts_buf: [40]u8 = undefined;
     const now = try formatTimestamp(&ts_buf);
 
-    // Begin transaction for atomicity
-    try storage.db.exec("BEGIN TRANSACTION");
-    errdefer storage.db.exec("ROLLBACK") catch {};
-
     // Process todos
     for (todos) |todo| {
         const content = todo.content;
         const status = todo.status;
 
         if (std.mem.eql(u8, status, "completed")) {
-            // Mark as done if we have mapping - only remove on success
+            // Mark as done if we have mapping
             const dot_id = mapping.map.get(content) orelse return error.MissingTodoMapping;
-            try storage.updateStatusNoTransaction(dot_id, "closed", now, now, "Completed via TodoWrite");
+            try storage.updateStatus(dot_id, .closed, now, "Completed via TodoWrite");
             if (mapping.map.fetchOrderedRemove(content)) |kv| {
                 allocator.free(kv.key);
                 allocator.free(kv.value);
             }
         } else if (mapping.map.get(content)) |dot_id| {
-            // Update status if changed (pending <-> in_progress)
-            const new_db_status: []const u8 = if (std.mem.eql(u8, status, "in_progress")) "active" else "open";
-            try storage.updateStatusNoTransaction(dot_id, new_db_status, now, null, null);
+            // Update status if changed
+            const new_status: Status = if (std.mem.eql(u8, status, "in_progress")) .active else .open;
+            try storage.updateStatus(dot_id, new_status, null, null);
         } else {
             // Create new dot
-            const id = try generateId(allocator, prefix);
+            const id = try storage_mod.generateId(allocator, prefix);
             defer allocator.free(id);
             const desc = todo.activeForm orelse "";
             const priority: i64 = if (std.mem.eql(u8, status, "in_progress")) 1 else default_priority;
 
-            const issue = sqlite.Issue{
+            const issue = Issue{
                 .id = id,
                 .title = content,
                 .description = desc,
-                .status = if (std.mem.eql(u8, status, "in_progress")) "active" else "open",
+                .status = if (std.mem.eql(u8, status, "in_progress")) .active else .open,
                 .priority = priority,
                 .issue_type = "task",
                 .assignee = null,
                 .created_at = now,
-                .updated_at = now,
                 .closed_at = null,
                 .close_reason = null,
-                .after = null,
-                .parent = null,
+                .blocks = &.{},
             };
 
-            try storage.createIssueNoTransaction(issue);
+            try storage.createIssue(issue, null);
 
             // Save mapping
             const key = try allocator.dupe(u8, content);
@@ -797,11 +798,7 @@ fn hookSync(allocator: Allocator) !void {
         }
     }
 
-    // Commit transaction first (DB is source of truth)
-    try storage.db.exec("COMMIT");
-
-    // Save mapping after DB commit succeeds
-    // If this fails, mapping can be rebuilt from DB on next run
+    // Save mapping
     try saveMappingAtomic(allocator, mapping);
 }
 
@@ -844,31 +841,129 @@ fn loadMapping(allocator: Allocator) !Mapping {
     return map;
 }
 
-fn saveMapping(allocator: Allocator, map: Mapping) !void {
-    const file = try fs.cwd().createFile(MAPPING_FILE, .{});
-    defer file.close();
-
-    const json = try std.json.Stringify.valueAlloc(allocator, map, .{});
-    defer allocator.free(json);
-
-    try file.writeAll(json);
-    try file.sync();
-}
-
 fn saveMappingAtomic(allocator: Allocator, map: Mapping) !void {
     const tmp_file = MAPPING_FILE ++ ".tmp";
 
     // Write to temp file
     const file = try fs.cwd().createFile(tmp_file, .{});
-    errdefer fs.cwd().deleteFile(tmp_file) catch {};
+    defer file.close();
+    errdefer fs.cwd().deleteFile(tmp_file) catch |err| switch (err) {
+        error.FileNotFound => {}, // Already deleted
+        else => {}, // Best effort cleanup
+    };
 
     const json = try std.json.Stringify.valueAlloc(allocator, map, .{});
     defer allocator.free(json);
 
     try file.writeAll(json);
     try file.sync();
-    file.close();
 
     // Atomic rename
     try fs.cwd().rename(tmp_file, MAPPING_FILE);
+}
+
+// JSONL hydration for migration
+const JsonlDependency = struct {
+    depends_on_id: []const u8,
+    type: ?[]const u8 = null,
+};
+
+const JsonlIssue = struct {
+    id: []const u8,
+    title: []const u8,
+    description: ?[]const u8 = null,
+    status: []const u8,
+    priority: i64,
+    issue_type: []const u8,
+    assignee: ?[]const u8 = null,
+    created_at: []const u8,
+    updated_at: ?[]const u8 = null,
+    closed_at: ?[]const u8 = null,
+    close_reason: ?[]const u8 = null,
+    dependencies: ?[]const JsonlDependency = null,
+};
+
+fn hydrateFromJsonl(allocator: Allocator, storage: *Storage, jsonl_path: []const u8) !usize {
+    const file = fs.cwd().openFile(jsonl_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return 0,
+        else => return err,
+    };
+    defer file.close();
+
+    const content = try file.readToEndAlloc(allocator, 100 * 1024 * 1024);
+    defer allocator.free(content);
+
+    var count: usize = 0;
+    var line_iter = std.mem.splitScalar(u8, content, '\n');
+
+    while (line_iter.next()) |line| {
+        if (line.len == 0) continue;
+
+        const parsed = std.json.parseFromSlice(JsonlIssue, allocator, line, .{
+            .ignore_unknown_fields = true,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => continue, // Malformed JSON line, skip
+        };
+        defer parsed.deinit();
+
+        const obj = parsed.value;
+
+        // Normalize status
+        const status = Status.parse(obj.status) orelse blk: {
+            if (std.mem.eql(u8, obj.status, "in_progress")) break :blk Status.active;
+            if (std.mem.eql(u8, obj.status, "done")) break :blk Status.closed;
+            break :blk Status.open;
+        };
+
+        const issue = Issue{
+            .id = obj.id,
+            .title = obj.title,
+            .description = obj.description orelse "",
+            .status = status,
+            .priority = obj.priority,
+            .issue_type = obj.issue_type,
+            .assignee = obj.assignee,
+            .created_at = obj.created_at,
+            .closed_at = obj.closed_at,
+            .close_reason = obj.close_reason,
+            .blocks = &.{},
+        };
+
+        // Determine parent from dependencies
+        var parent_id: ?[]const u8 = null;
+        if (obj.dependencies) |deps| {
+            for (deps) |dep| {
+                const dep_type = dep.type orelse "blocks";
+                if (std.mem.eql(u8, dep_type, "parent-child")) {
+                    parent_id = dep.depends_on_id;
+                    break;
+                }
+            }
+        }
+
+        storage.createIssue(issue, parent_id) catch |err| switch (err) {
+            error.IssueAlreadyExists => continue, // Duplicate in JSONL, skip
+            error.OutOfMemory => return error.OutOfMemory,
+            else => continue, // Other expected errors (invalid ID format, etc.)
+        };
+
+        // Add block dependencies
+        if (obj.dependencies) |deps| {
+            for (deps) |dep| {
+                const dep_type = dep.type orelse "blocks";
+                if (std.mem.eql(u8, dep_type, "blocks")) {
+                    storage.addDependency(obj.id, dep.depends_on_id, "blocks") catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        // DependencyNotFound, DependencyCycle, InvalidId are expected during migration
+                        else => {},
+                    };
+                }
+            }
+        }
+
+        count += 1;
+    }
+
+    return count;
 }

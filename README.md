@@ -2,15 +2,28 @@
 
 # dots
 
-> **Like beads, but smaller and faster!**
+> **Fast, minimal task tracking with plain markdown files — no database required**
 
-Minimal task tracker for AI agents. 21x smaller than beads (0.9MB vs 19MB), 2x faster startup (~3ms), built-in Claude Code hooks, beads-compatible SQLite storage.
+Minimal task tracker for AI agents with built-in Claude Code hooks.
+
+| | beads (SQLite) | dots (markdown) |
+|---|---:|---:|
+| Binary | 25 MB | **233 KB** (107x smaller) |
+| Lines of code | 115,000 | **2,800** (41x less) |
+| Dependencies | Go, SQLite/Wasm | None |
+| Portability | Rebuild per platform | Copy `.dots/` anywhere |
 
 ## What is dots?
 
-dots is a CLI task tracker designed for Claude Code hooks. It stores tasks in `.beads/beads.db` (SQLite) for beads compatibility, enabling drop-in replacement. Each task has an ID, title, status, priority, and optional parent/dependency relationships.
+A CLI task tracker with **zero dependencies** — tasks are plain markdown files with YAML frontmatter in `.dots/`. No database, no server, no configuration. Copy the folder between machines, commit to git, edit with any tool. Parent-child relationships map to folders. Each task has an ID, title, status, priority, and optional dependencies.
 
 ## Installation
+
+### Homebrew
+
+```bash
+brew install joelreymont/tap/dots
+```
 
 ### From source (requires Zig 0.15+)
 
@@ -25,7 +38,7 @@ cp zig-out/bin/dot ~/.local/bin/
 
 ```bash
 dot --version
-# Output: dots 0.3.2
+# Output: dots 0.5.0
 ```
 
 ## Quick Start
@@ -33,23 +46,23 @@ dot --version
 ```bash
 # Initialize in current directory
 dot init
-# Creates: .beads/beads.db
+# Creates: .dots/ directory (added to git if in repo)
 
 # Add a task
 dot add "Fix the login bug"
-# Output: bd-a1b2c3d4
+# Output: dots-a1b2c3d4e5f6a7b8
 
 # List tasks
 dot ls
-# Output: [bd-a1b2c3d4] o Fix the login bug
+# Output: [a1b2c3d] o Fix the login bug
 
 # Start working
-dot on bd-a1b2c3d4
+dot on a1b2c3d
 # Output: (none, task marked active)
 
 # Complete task
-dot off bd-a1b2c3d4 -r "Fixed in commit abc123"
-# Output: (none, task marked done)
+dot off a1b2c3d -r "Fixed in commit abc123"
+# Output: (none, task marked done and archived)
 ```
 
 ## Command Reference
@@ -59,7 +72,7 @@ dot off bd-a1b2c3d4 -r "Fixed in commit abc123"
 ```bash
 dot init
 ```
-Creates `.beads/beads.db` SQLite database. Safe to run if already exists.
+Creates `.dots/` directory. Runs `git add .dots` if in a git repository. Safe to run if already exists.
 
 ### Add Task
 
@@ -70,21 +83,21 @@ dot "title"  # shorthand for: dot add "title"
 
 Options:
 - `-p N`: Priority 0-4 (0 = highest, default 2)
-- `-d "text"`: Long description
-- `-P ID`: Parent task ID (for hierarchy)
+- `-d "text"`: Long description (markdown body of the file)
+- `-P ID`: Parent task ID (creates folder hierarchy)
 - `-a ID`: Blocked by task ID (dependency)
 - `--json`: Output created task as JSON
 
 Examples:
 ```bash
 dot add "Design API" -p 1
-# Output: bd-1a2b3c4d
+# Output: dots-1a2b3c4d5e6f7890
 
-dot add "Implement API" -a bd-1a2b3c4d -d "REST endpoints for user management"
-# Output: bd-3c4d5e6f
+dot add "Implement API" -a dots-1a2b3c4d -d "REST endpoints for user management"
+# Output: dots-3c4d5e6f7a8b9012
 
 dot add "Write tests" --json
-# Output: {"id":"bd-5e6f7a8b","title":"Write tests","status":"open","priority":2,...}
+# Output: {"id":"dots-5e6f7a8b9012cdef","title":"Write tests","status":"open","priority":2,...}
 ```
 
 ### List Tasks
@@ -99,14 +112,9 @@ Options:
 
 Output format (text):
 ```
-[bd-1a2b3c4d] o Design API        # o = open
-[bd-3c4d5e6f] > Implement API     # > = active
-[bd-5e6f7a8b] x Write tests       # x = done
-```
-
-Output format (JSON):
-```json
-[{"id":"bd-1a2b3c4d","title":"Design API","status":"open","priority":1,...}]
+[1a2b3c4] o Design API        # o = open
+[3c4d5e6] > Implement API     # > = active
+[5e6f7a8] x Write tests       # x = done
 ```
 
 ### Start Working
@@ -114,14 +122,14 @@ Output format (JSON):
 ```bash
 dot on <id> [id2 ...]
 ```
-Marks task(s) as `active`. Use when you begin working on tasks.
+Marks task(s) as `active`. Use when you begin working on tasks. Supports short ID prefixes.
 
 ### Complete Task
 
 ```bash
 dot off <id> [id2 ...] [-r "reason"]
 ```
-Marks task(s) as `done`. Optional reason applies to all.
+Marks task(s) as `done` and archives them. Optional reason applies to all. Root tasks are moved to `.dots/archive/`. Child tasks wait for parent to close before moving.
 
 ### Show Task Details
 
@@ -131,12 +139,12 @@ dot show <id>
 
 Output:
 ```
-ID:       bd-1a2b3c4d
+ID:       dots-1a2b3c4d5e6f7890
 Title:    Design API
 Status:   open
 Priority: 1
 Desc:     REST endpoints for user management
-Created:  2024-12-24T10:30:00.000000+00:00
+Created:  2024-12-24T10:30:00Z
 ```
 
 ### Remove Task
@@ -144,7 +152,7 @@ Created:  2024-12-24T10:30:00.000000+00:00
 ```bash
 dot rm <id> [id2 ...]
 ```
-Permanently deletes task(s) from database.
+Permanently deletes task file(s). If removing a parent, children are also deleted.
 
 ### Show Ready Tasks
 
@@ -161,10 +169,10 @@ dot tree
 
 Output:
 ```
-[bd-1a2b3c4d] ○ Build auth system
-  └─ [bd-2b3c4d5e] ○ Design schema
-  └─ [bd-3c4d5e6f] ○ Implement endpoints (blocked)
-  └─ [bd-4d5e6f7a] ○ Write tests (blocked)
+[1a2b3c4] o Build auth system
+  +- [2b3c4d5] o Design schema
+  +- [3c4d5e6] o Implement endpoints (blocked)
+  +- [4d5e6f7] o Write tests (blocked)
 ```
 
 ### Search Tasks
@@ -174,31 +182,66 @@ dot find "query"
 ```
 Case-insensitive search in title and description.
 
-## Data Model
+### Purge Archive
 
-Tasks are stored in `.beads/beads.db` (SQLite). JSON output format:
+```bash
+dot purge
+```
+Permanently deletes all archived (completed) tasks from `.dots/archive/`.
 
-```json
-{
-  "id": "bd-1a2b3c4d",
-  "title": "Fix login bug",
-  "description": "Users can't log in with special characters",
-  "status": "open",
-  "priority": 2,
-  "created_at": "2024-12-24T10:30:00.000000+00:00",
-  "updated_at": "2024-12-24T10:30:00.000000+00:00"
-}
+## Storage Format
+
+Tasks are stored as markdown files with YAML frontmatter in `.dots/`:
+
+```
+.dots/
+  a1b2c3d4e5f6a7b8.md              # Root dot (no children)
+  f9e8d7c6b5a49382/                # Parent with children
+    f9e8d7c6b5a49382.md            # Parent dot file
+    1a2b3c4d5e6f7890.md            # Child dot
+  archive/                          # Closed dots
+    oldtask12345678.md             # Archived root dot
+    oldparent1234567/              # Archived tree
+      oldparent1234567.md
+      oldchild23456789.md
+  config                            # ID prefix setting
+```
+
+### File Format
+
+```markdown
+---
+title: Fix the bug
+status: open
+priority: 2
+issue-type: task
+assignee: joel
+created-at: 2024-12-24T10:30:00Z
+blocks:
+  - a3f2b1c8d9e04a7b
+---
+
+Description as markdown body here.
+```
+
+### ID Format
+
+IDs are prefixed hex strings like `dots-a3f2b1c8d9e04a7b`. The prefix is configurable via `.dots/config`. Commands accept short prefixes:
+
+```bash
+dot on a3f2b1    # Matches dots-a3f2b1c8d9e04a7b
+dot show a3f     # Error if ambiguous (multiple matches)
 ```
 
 ### Status Flow
 
 ```
-open → active → done
+open -> active -> done (archived)
 ```
 
 - `open`: Task created, not started
 - `active`: Currently being worked on
-- `done`: Completed
+- `done`: Completed, moved to archive
 
 ### Priority Scale
 
@@ -210,8 +253,15 @@ open → active → done
 
 ### Dependencies
 
-- `parent`: Groups tasks hierarchically (shown in `dot tree`)
-- `after`: Blocks task until dependency is `done` (shown in `dot ready`)
+- `parent (-P)`: Creates folder hierarchy. Parent folder contains child files.
+- `blocks (-a)`: Stored in frontmatter. Task blocked until all blockers are `done`.
+
+### Archive Behavior
+
+When a task is marked done:
+- **Root tasks**: Immediately moved to `.dots/archive/`
+- **Child tasks**: Stay in parent folder until parent is closed
+- **Parent tasks**: Only archive when ALL children are closed (moves entire folder)
 
 ## Claude Code Integration
 
@@ -247,36 +297,33 @@ Add to `~/.claude/settings.json`:
 ```
 
 The `sync` hook automatically:
-- Creates `.beads/` directory if needed
-- Maps TodoWrite content to dot IDs (stored in `.beads/todo-mapping.json`)
+- Creates `.dots/` directory if needed
+- Maps TodoWrite content to dot IDs (stored in `.dots/todo-mapping.json`)
 - Creates new dots for new todos
 - Marks dots as done when todos are completed
 
-## Beads Compatibility
+## Migrating from beads
 
-dots supports beads command aliases for drop-in replacement:
+If you have existing tasks in `.beads/beads.db`, use the migration script:
 
-| beads command | dots equivalent |
-|---------------|-----------------|
-| `bd create "title"` | `dot create "title"` |
-| `bd update ID --status in_progress` | `dot update ID --status active` |
-| `bd close ID --reason "done"` | `dot close ID --reason "done"` |
-| `bd list --json` | `dot ls --json` |
-| `bd ready --json` | `dot ready --json` |
+```bash
+./migrate-dots.sh
+```
 
-Status mapping: beads `in_progress` = dots `active`
+This exports your tasks from SQLite and imports them as markdown files. The script verifies the migration was successful before prompting you to delete the old `.beads/` directory.
+
+Requirements: `sqlite3` and `jq` must be installed.
 
 ## Why dots?
 
-Both binaries statically link SQLite for zero runtime dependencies.
-
-| | beads | dots | diff |
-|---|------:|-----:|------|
-| Binary | 19 MB | 0.9 MB | 21x smaller |
-| Code | 188K lines | ~800 lines | 235x smaller |
-| Startup | ~7ms | ~3ms | 2x faster |
-| Storage | SQLite | SQLite | same |
-| Daemon | Required | None | — |
+| Feature | Description |
+|---------|-------------|
+| Markdown files | Human-readable, git-friendly storage |
+| YAML frontmatter | Structured metadata with flexible body |
+| Folder hierarchy | Parent-child relationships as directories |
+| Short IDs | Type `a3f` instead of `dots-a3f2b1c8d9e04a7b` |
+| Archive | Completed tasks out of sight, available if needed |
+| Zero dependencies | Single binary, no runtime requirements |
 
 ## License
 
