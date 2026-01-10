@@ -15,6 +15,7 @@ const Status = storage_mod.Status;
 
 const DOTS_DIR = ".dots";
 const MAPPING_FILE = ".dots/todo-mapping.json";
+const LOCK_FILE = ".dots/todo-mapping.lock";
 const max_hook_input_bytes = 1024 * 1024;
 const max_mapping_bytes = 1024 * 1024;
 const max_jsonl_line_bytes = 1024 * 1024;
@@ -750,11 +751,18 @@ fn hookSync(allocator: Allocator) !void {
     var storage = try openStorage(allocator);
     defer storage.close();
 
+    // Acquire lock for mapping file (prevents TOCTOU race with concurrent syncs)
+    const lock_file = fs.cwd().createFile(LOCK_FILE, .{ .lock = .exclusive }) catch |err| switch (err) {
+        error.WouldBlock => return, // Another sync in progress, skip
+        else => return err,
+    };
+    defer lock_file.close();
+
     // Get prefix for ID generation
     const prefix = try storage_mod.getOrCreatePrefix(allocator, &storage);
     defer allocator.free(prefix);
 
-    // Load mapping
+    // Load mapping (under lock)
     var mapping = try loadMapping(allocator);
     defer mapping_util.deinit(allocator, &mapping);
 

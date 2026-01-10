@@ -614,7 +614,7 @@ test "prop: unknown id errors" {
     }.property, .{ .iterations = 20, .seed = 0xBAD1D });
 }
 
-test "prop: dependency cycle rejected" {
+test "storage: dependency cycle rejected" {
     // Test cycle detection at storage level
     const allocator = std.testing.allocator;
 
@@ -645,7 +645,7 @@ test "prop: dependency cycle rejected" {
     try std.testing.expectError(error.DependencyCycle, cycle_result);
 }
 
-test "prop: delete cascade unblocks dependents" {
+test "storage: delete cascade unblocks dependents" {
     // Test that deleting a blocker unblocks its dependents
     const allocator = std.testing.allocator;
 
