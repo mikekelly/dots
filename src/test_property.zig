@@ -389,8 +389,8 @@ test "prop: invalid dependency rejected" {
 test "prop: lifecycle simulation maintains invariants" {
     // Simulate random sequences of operations and verify state consistency
     const LifecycleCase = struct {
-        // Sequence of operations: each is (op_type, target_idx, secondary_idx, priority)
-        ops: [12]struct { op: u3, target: u3, secondary: u3, priority: u3 },
+        // Sequence of operations: each is (op_type, target_idx, secondary_idx)
+        ops: [12]struct { op: u3, target: u3, secondary: u3 },
     };
 
     try zc.check(struct {
@@ -431,7 +431,6 @@ test "prop: lifecycle simulation maintains invariants" {
                                 .title = id,
                                 .description = "",
                                 .status = .open,
-                                .priority = op_data.priority % 5,
                                 .issue_type = "task",
                                 .assignee = null,
                                 .created_at = fixed_timestamp,
@@ -441,35 +440,35 @@ test "prop: lifecycle simulation maintains invariants" {
                                 .parent = null,
                             };
                             ts.storage.createIssue(issue, null) catch continue;
-                            oracle.create(idx, op_data.priority % 5, null);
+                            oracle.create(idx, null);
                         }
                     },
                     .delete => {
-                        if (oracle.exists[idx]) {
+                        if (oracle.exists[idx] and !oracle.archived[idx]) {
                             ts.storage.deleteIssue(ids[idx].?) catch continue;
                             oracle.delete(idx);
                         }
                     },
                     .set_open => {
-                        if (oracle.exists[idx]) {
+                        if (oracle.exists[idx] and !oracle.archived[idx]) {
                             ts.storage.updateStatus(ids[idx].?, .open, null, null) catch continue;
                             oracle.setStatus(idx, .open);
                         }
                     },
                     .set_active => {
-                        if (oracle.exists[idx]) {
+                        if (oracle.exists[idx] and !oracle.archived[idx]) {
                             ts.storage.updateStatus(ids[idx].?, .active, null, null) catch continue;
                             oracle.setStatus(idx, .active);
                         }
                     },
                     .set_closed => {
-                        if (oracle.exists[idx] and oracle.canClose(idx)) {
+                        if (oracle.exists[idx] and !oracle.archived[idx] and oracle.canClose(idx)) {
                             ts.storage.updateStatus(ids[idx].?, .closed, fixed_timestamp, null) catch continue;
                             oracle.setStatus(idx, .closed);
                         }
                     },
                     .add_dep => {
-                        if (oracle.exists[idx] and oracle.exists[secondary] and idx != secondary) {
+                        if (oracle.exists[idx] and !oracle.archived[idx] and oracle.exists[secondary] and !oracle.archived[secondary] and idx != secondary) {
                             if (ts.storage.addDependency(ids[idx].?, ids[secondary].?, "blocks")) {
                                 _ = oracle.addDep(idx, secondary);
                             } else |err| switch (err) {
@@ -549,7 +548,6 @@ test "prop: transitive blocking chains" {
                     .title = ids[i],
                     .description = "",
                     .status = status,
-                    .priority = 2,
                     .issue_type = "task",
                     .assignee = null,
                     .created_at = fixed_timestamp,
@@ -616,7 +614,6 @@ test "prop: parent-child close constraint" {
                 .title = "Parent",
                 .description = "",
                 .status = .open,
-                .priority = 2,
                 .issue_type = "task",
                 .assignee = null,
                 .created_at = fixed_timestamp,
@@ -640,7 +637,6 @@ test "prop: parent-child close constraint" {
                     .title = id,
                     .description = "",
                     .status = if (is_closed) .closed else .open,
-                    .priority = 2,
                     .issue_type = "task",
                     .assignee = null,
                     .created_at = fixed_timestamp,
@@ -675,59 +671,6 @@ test "prop: parent-child close constraint" {
     }.property, .{ .iterations = 30, .seed = 0xDAD });
 }
 
-test "prop: priority ordering in list" {
-    // List should return issues sorted by priority (lower = higher priority)
-    const PriorityCase = struct {
-        priorities: [6]u3,
-    };
-
-    try zc.check(struct {
-        fn property(args: PriorityCase) bool {
-            const allocator = std.testing.allocator;
-
-            const test_dir = setupTestDirOrPanic(allocator);
-            defer cleanupTestDirAndFree(allocator, test_dir);
-
-            var ts = openTestStorage(allocator, test_dir);
-            defer ts.deinit();
-
-            // Create issues with random priorities
-            for (0..6) |i| {
-                var id_buf: [16]u8 = undefined;
-                const id = std.fmt.bufPrint(&id_buf, "pri-{d}", .{i}) catch return false;
-                const issue = Issue{
-                    .id = id,
-                    .title = id,
-                    .description = "",
-                    .status = .open,
-                    .priority = args.priorities[i] % 5,
-                    .issue_type = "task",
-                    .assignee = null,
-                    .created_at = fixed_timestamp,
-                    .closed_at = null,
-                    .close_reason = null,
-                    .blocks = &.{},
-                    .parent = null,
-                };
-                ts.storage.createIssue(issue, null) catch return false;
-            }
-
-            // Get list
-            const issues = ts.storage.listIssues(.open) catch return false;
-            defer storage_mod.freeIssues(allocator, issues);
-
-            // Verify sorted by priority (ascending)
-            var prev_priority: i64 = -1;
-            for (issues) |issue| {
-                if (issue.priority < prev_priority) return false;
-                prev_priority = issue.priority;
-            }
-
-            return true;
-        }
-    }.property, .{ .iterations = 30, .seed = 0xACE });
-}
-
 test "prop: status transition state machine" {
     // Verify: closed issues have closed_at, open/active don't
     // Verify: reopening clears closed_at
@@ -751,7 +694,6 @@ test "prop: status transition state machine" {
                 .title = "Transition Test",
                 .description = "",
                 .status = .open,
-                .priority = 2,
                 .issue_type = "task",
                 .assignee = null,
                 .created_at = fixed_timestamp,
@@ -838,7 +780,6 @@ test "prop: search finds exactly matching issues" {
                     .title = title_buf[0..len],
                     .description = "",
                     .status = .open,
-                    .priority = 2,
                     .issue_type = "task",
                     .assignee = null,
                     .created_at = fixed_timestamp,

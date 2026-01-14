@@ -41,7 +41,6 @@ test "snap: markdown frontmatter format" {
     // Add a task with specific parameters
     const add = runTsk(allocator, &.{
         "add", "Test snapshot task",
-        "-p",  "1",
         "-d",  "This is a description",
     }, test_dir) catch |err| {
         std.debug.panic("add: {}", .{err});
@@ -84,7 +83,6 @@ test "snap: markdown frontmatter format" {
         \\  "---
         \\title: Test snapshot task
         \\status: open
-        \\priority: 1
         \\issue-type: task
         \\created-at: <TIMESTAMP>
         \\peer-index: 0
@@ -107,11 +105,11 @@ test "snap: json output format" {
     defer init.deinit(allocator);
 
     // Add tasks
-    const add1 = runTsk(allocator, &.{ "add", "First task", "-p", "0" }, test_dir) catch |err| {
+    const add1 = runTsk(allocator, &.{ "add", "First task" }, test_dir) catch |err| {
         std.debug.panic("add1: {}", .{err});
     };
     defer add1.deinit(allocator);
-    const add2 = runTsk(allocator, &.{ "add", "Second task", "-p", "2" }, test_dir) catch |err| {
+    const add2 = runTsk(allocator, &.{ "add", "Second task" }, test_dir) catch |err| {
         std.debug.panic("add2: {}", .{err});
     };
     defer add2.deinit(allocator);
@@ -127,7 +125,6 @@ test "snap: json output format" {
         id: []const u8,
         title: []const u8,
         status: []const u8,
-        priority: i64,
     };
 
     const parsed = std.json.parseFromSlice([]JsonIssueSnap, allocator, ls.stdout, .{
@@ -137,19 +134,19 @@ test "snap: json output format" {
     };
     defer parsed.deinit();
 
-    // Sort by priority for stable output
+    // Sort by title for stable output
     std.mem.sort(JsonIssueSnap, parsed.value, {}, struct {
         fn lessThan(_: void, a: JsonIssueSnap, b: JsonIssueSnap) bool {
-            return a.priority < b.priority;
+            return std.mem.order(u8, a.title, b.title) == .lt;
         }
     }.lessThan);
 
-    // Build normalized output (just titles and priorities)
+    // Build normalized output (just titles)
     var output = std.ArrayList(u8){};
     defer output.deinit(allocator);
 
     for (parsed.value) |issue| {
-        const line = std.fmt.allocPrint(allocator, "{s} (p{d})\n", .{ issue.title, issue.priority }) catch |err| {
+        const line = std.fmt.allocPrint(allocator, "{s}\n", .{issue.title}) catch |err| {
             std.debug.panic("fmt: {}", .{err});
         };
         defer allocator.free(line);
@@ -159,8 +156,8 @@ test "snap: json output format" {
     const oh = OhSnap{};
     try oh.snap(@src(),
         \\[]u8
-        \\  "First task (p0)
-        \\Second task (p2)
+        \\  "First task
+        \\Second task
         \\"
     ).expectEqual(output.items);
 }

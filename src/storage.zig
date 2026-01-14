@@ -10,7 +10,6 @@ const MAX_PATH_LEN = 512; // Maximum path length for file operations
 const MAX_ID_LEN = 128; // Maximum ID length (validated in validateId)
 const MAX_ISSUE_FILE_SIZE = 1024 * 1024; // 1MB max issue file
 const MAX_CONFIG_SIZE = 64 * 1024; // 64KB max config file
-const DEFAULT_PRIORITY: i64 = 2; // Default priority for new issues
 
 // Errors
 pub const StorageError = error{
@@ -118,7 +117,6 @@ pub const Issue = struct {
     title: []const u8,
     description: []const u8,
     status: Status,
-    priority: i64,
     issue_type: []const u8,
     assignee: ?[]const u8,
     created_at: []const u8,
@@ -129,12 +127,11 @@ pub const Issue = struct {
     // Computed from path, not stored in frontmatter
     parent: ?[]const u8 = null,
 
-    /// Compare issues by peer_index (ascending), then priority (ascending), then created_at (ascending)
+    /// Compare issues by peer_index (ascending), then created_at (ascending)
     pub fn order(_: void, a: Issue, b: Issue) bool {
         // Sort by peer_index first
         if (a.peer_index != b.peer_index) return a.peer_index < b.peer_index;
-        // Fall back to priority, then created_at
-        if (a.priority != b.priority) return a.priority < b.priority;
+        // Fall back to created_at
         return std.mem.order(u8, a.created_at, b.created_at) == .lt;
     }
 
@@ -145,7 +142,6 @@ pub const Issue = struct {
             .title = self.title,
             .description = self.description,
             .status = status,
-            .priority = self.priority,
             .issue_type = self.issue_type,
             .assignee = self.assignee,
             .created_at = self.created_at,
@@ -164,7 +160,6 @@ pub const Issue = struct {
             .title = self.title,
             .description = self.description,
             .status = self.status,
-            .priority = self.priority,
             .issue_type = self.issue_type,
             .assignee = self.assignee,
             .created_at = self.created_at,
@@ -220,7 +215,6 @@ pub const Issue = struct {
             .title = title,
             .description = description,
             .status = self.status,
-            .priority = self.priority,
             .issue_type = issue_type,
             .assignee = assignee,
             .created_at = created_at,
@@ -330,7 +324,6 @@ pub fn freeOrphanParents(allocator: Allocator, orphans: []const []const u8) void
 const Frontmatter = struct {
     title: []const u8 = "",
     status: Status = .open,
-    priority: i64 = DEFAULT_PRIORITY,
     issue_type: []const u8 = "task",
     assignee: ?[]const u8 = null,
     created_at: []const u8 = "",
@@ -358,7 +351,6 @@ const ParseResult = struct {
 const FrontmatterField = enum {
     title,
     status,
-    priority,
     issue_type,
     assignee,
     created_at,
@@ -371,7 +363,6 @@ const FrontmatterField = enum {
 const frontmatter_field_map = std.StaticStringMap(FrontmatterField).initComptime(.{
     .{ "title", .title },
     .{ "status", .status },
-    .{ "priority", .priority },
     .{ "issue-type", .issue_type },
     .{ "assignee", .assignee },
     .{ "created-at", .created_at },
@@ -498,7 +489,6 @@ fn parseFrontmatter(allocator: Allocator, content: []const u8) !ParseResult {
                 allocated_title = parsed.getOwned();
             },
             .status => fm.status = Status.parse(value) orelse return StorageError.InvalidStatus,
-            .priority => fm.priority = std.fmt.parseInt(i64, value, 10) catch return StorageError.InvalidFrontmatter,
             .issue_type => fm.issue_type = value,
             .assignee => fm.assignee = if (value.len > 0) value else null,
             .created_at => fm.created_at = value,
@@ -574,12 +564,6 @@ fn serializeFrontmatter(allocator: Allocator, issue: Issue) ![]u8 {
     try writeYamlValue(&buf, allocator, issue.title);
     try buf.appendSlice(allocator, "\nstatus: ");
     try buf.appendSlice(allocator, issue.status.toString());
-    try buf.appendSlice(allocator, "\npriority: ");
-
-    var priority_buf: [21]u8 = undefined; // i64 max is 19 digits + sign
-    const priority_str = std.fmt.bufPrint(&priority_buf, "{d}", .{issue.priority}) catch return error.OutOfMemory;
-    try buf.appendSlice(allocator, priority_str);
-
     try buf.appendSlice(allocator, "\nissue-type: ");
     try writeYamlValue(&buf, allocator, issue.issue_type);
 
@@ -625,234 +609,12 @@ fn serializeFrontmatter(allocator: Allocator, issue: Issue) ![]u8 {
     return buf.toOwnedSlice(allocator);
 }
 
-// Common abbreviations for slugify
-const abbrev_map = std.StaticStringMap([]const u8).initComptime(.{
-    .{ "authentication", "auth" },
-    .{ "authorization", "authz" },
-    .{ "configuration", "config" },
-    .{ "application", "app" },
-    .{ "database", "db" },
-    .{ "implementation", "impl" },
-    .{ "environment", "env" },
-    .{ "development", "dev" },
-    .{ "production", "prod" },
-    .{ "repository", "repo" },
-    .{ "function", "fn" },
-    .{ "parameter", "param" },
-    .{ "parameters", "params" },
-    .{ "initialize", "init" },
-    .{ "initialization", "init" },
-    .{ "message", "msg" },
-    .{ "messages", "msgs" },
-    .{ "request", "req" },
-    .{ "response", "resp" },
-    .{ "temporary", "tmp" },
-    .{ "directory", "dir" },
-    .{ "document", "doc" },
-    .{ "documents", "docs" },
-    .{ "documentation", "docs" },
-    .{ "management", "mgmt" },
-    .{ "information", "info" },
-    .{ "notification", "notif" },
-    .{ "notifications", "notifs" },
-    .{ "connection", "conn" },
-    .{ "transaction", "txn" },
-    .{ "transactions", "txns" },
-    .{ "synchronization", "sync" },
-    .{ "asynchronous", "async" },
-    .{ "specification", "spec" },
-    .{ "specifications", "specs" },
-    .{ "validation", "valid" },
-    .{ "generation", "gen" },
-    .{ "interface", "iface" },
-    .{ "property", "prop" },
-    .{ "properties", "props" },
-    .{ "attribute", "attr" },
-    .{ "attributes", "attrs" },
-    .{ "administrator", "admin" },
-    .{ "administration", "admin" },
-    .{ "communication", "comm" },
-    .{ "utility", "util" },
-    .{ "utilities", "utils" },
-    .{ "dependency", "dep" },
-    .{ "dependencies", "deps" },
-    .{ "operation", "op" },
-    .{ "operations", "ops" },
-    .{ "expression", "expr" },
-    .{ "reference", "ref" },
-    .{ "references", "refs" },
-    .{ "description", "desc" },
-    .{ "certificate", "cert" },
-    .{ "certificates", "certs" },
-    .{ "maximum", "max" },
-    .{ "minimum", "min" },
-    .{ "number", "num" },
-    .{ "string", "str" },
-    .{ "integer", "int" },
-    .{ "boolean", "bool" },
-    .{ "character", "char" },
-    .{ "source", "src" },
-    .{ "destination", "dest" },
-    .{ "previous", "prev" },
-    .{ "current", "curr" },
-    .{ "original", "orig" },
-    .{ "address", "addr" },
-    .{ "memory", "mem" },
-    .{ "buffer", "buf" },
-    .{ "allocator", "alloc" },
-    .{ "context", "ctx" },
-    .{ "argument", "arg" },
-    .{ "arguments", "args" },
-    .{ "package", "pkg" },
-    .{ "packages", "pkgs" },
-    .{ "library", "lib" },
-    .{ "libraries", "libs" },
-    .{ "command", "cmd" },
-    .{ "execute", "exec" },
-    .{ "execution", "exec" },
-    .{ "continue", "cont" },
-    .{ "index", "idx" },
-    .{ "length", "len" },
-    .{ "position", "pos" },
-    .{ "iterator", "iter" },
-    .{ "pointer", "ptr" },
-    .{ "object", "obj" },
-    .{ "exception", "exc" },
-    .{ "calculate", "calc" },
-    .{ "calculation", "calc" },
-    .{ "average", "avg" },
-    .{ "version", "ver" },
-    .{ "permission", "perm" },
-    .{ "permissions", "perms" },
-    .{ "password", "pwd" },
-    .{ "standard", "std" },
-    .{ "receive", "recv" },
-    .{ "callback", "cb" },
-    .{ "accumulator", "acc" },
-    .{ "condition", "cond" },
-    .{ "constant", "const" },
-    .{ "definition", "def" },
-    .{ "error", "err" },
-    .{ "server", "srv" },
-    .{ "service", "svc" },
-    .{ "services", "svcs" },
-    .{ "middleware", "mw" },
-    .{ "controller", "ctrl" },
-    .{ "variable", "var" },
-    .{ "variables", "vars" },
-    .{ "template", "tmpl" },
-    .{ "element", "elem" },
-    .{ "elements", "elems" },
-    .{ "protocol", "proto" },
-    .{ "statistics", "stats" },
-    .{ "component", "comp" },
-    .{ "components", "comps" },
-});
-
-const MAX_SLUG_LEN: usize = 30;
-const MAX_SLUG_WORDS: usize = 3;
-
-/// Convert title to URL-safe slug (max 3 words, 30 chars)
-/// Example: "Fix User Authentication Bug" -> "fix-user-auth"
-pub fn slugify(allocator: Allocator, title: []const u8) ![]u8 {
-    if (title.len == 0) {
-        return allocator.dupe(u8, "untitled");
-    }
-
-    var result: std.ArrayList(u8) = .{};
-    errdefer result.deinit(allocator);
-
-    var word_start: usize = 0;
-    var in_word = false;
-    var word_count: usize = 0;
-
-    for (title, 0..) |c, i| {
-        const is_alnum = std.ascii.isAlphanumeric(c);
-
-        if (is_alnum and !in_word) {
-            word_start = i;
-            in_word = true;
-        } else if (!is_alnum and in_word) {
-            // End of word - process it
-            try appendWord(allocator, &result, title[word_start..i]);
-            word_count += 1;
-            in_word = false;
-            if (result.items.len >= MAX_SLUG_LEN or word_count >= MAX_SLUG_WORDS) break;
-        }
-    }
-
-    // Handle last word
-    if (in_word and result.items.len < MAX_SLUG_LEN and word_count < MAX_SLUG_WORDS) {
-        try appendWord(allocator, &result, title[word_start..]);
-    }
-
-    // Truncate at word boundary if over limit
-    if (result.items.len > MAX_SLUG_LEN) {
-        var truncate_at = MAX_SLUG_LEN;
-        while (truncate_at > 0 and result.items[truncate_at - 1] != '-') : (truncate_at -= 1) {}
-        if (truncate_at > 0) truncate_at -= 1; // Remove trailing hyphen
-        result.shrinkRetainingCapacity(truncate_at);
-    }
-
-    // Remove trailing hyphen
-    while (result.items.len > 0 and result.items[result.items.len - 1] == '-') {
-        result.shrinkRetainingCapacity(result.items.len - 1);
-    }
-
-    if (result.items.len == 0) {
-        result.deinit(allocator);
-        return allocator.dupe(u8, "untitled");
-    }
-
-    return result.toOwnedSlice(allocator);
-}
-
-fn appendWord(allocator: Allocator, result: *std.ArrayList(u8), word: []const u8) !void {
-    if (word.len == 0) return;
-
-    // Add hyphen separator if not first word
-    if (result.items.len > 0) {
-        try result.append(allocator, '-');
-    }
-
-    // Lowercase the word for lookup
-    var lower_buf: [64]u8 = undefined;
-    if (word.len <= lower_buf.len) {
-        for (word, 0..) |c, i| {
-            lower_buf[i] = std.ascii.toLower(c);
-        }
-        const lower = lower_buf[0..word.len];
-
-        // Check abbreviation map
-        if (abbrev_map.get(lower)) |abbrev| {
-            try result.appendSlice(allocator, abbrev);
-            return;
-        }
-    }
-
-    // No abbreviation - append lowercase word
-    for (word) |c| {
-        try result.append(allocator, std.ascii.toLower(c));
-    }
-}
-
-// ID generation - {prefix}-{slug}-{8 hex chars}
+// ID generation - {prefix}-{8 hex chars}
 pub fn generateId(allocator: Allocator, prefix: []const u8) ![]u8 {
-    return generateIdWithTitle(allocator, prefix, null);
-}
-
-pub fn generateIdWithTitle(allocator: Allocator, prefix: []const u8, title: ?[]const u8) ![]u8 {
     var rand_bytes: [4]u8 = undefined;
     std.crypto.random.bytes(&rand_bytes);
     const hex = std.fmt.bytesToHex(rand_bytes, .lower);
-
-    if (title) |t| {
-        const slug = try slugify(allocator, t);
-        defer allocator.free(slug);
-        return std.fmt.allocPrint(allocator, "{s}-{s}-{s}", .{ prefix, slug, hex });
-    } else {
-        return std.fmt.allocPrint(allocator, "{s}-{s}", .{ prefix, hex });
-    }
+    return std.fmt.allocPrint(allocator, "{s}-{s}", .{ prefix, hex });
 }
 
 pub fn getOrCreatePrefix(allocator: Allocator, storage: *Storage) ![]const u8 {
@@ -1162,7 +924,6 @@ pub const Storage = struct {
             .title = title,
             .description = description,
             .status = parsed.frontmatter.status,
-            .priority = parsed.frontmatter.priority,
             .issue_type = issue_type,
             .assignee = assignee,
             .created_at = created_at,
@@ -1454,7 +1215,6 @@ pub const Storage = struct {
             .title = issue.title,
             .description = issue.description,
             .status = issue.status,
-            .priority = issue.priority,
             .issue_type = issue.issue_type,
             .assignee = issue.assignee,
             .created_at = issue.created_at,

@@ -14,9 +14,6 @@ const Status = storage_mod.Status;
 
 const TSK_DIR = storage_mod.TSK_DIR;
 const max_jsonl_line_bytes = 1024 * 1024;
-const default_priority: i64 = 2;
-const MIN_PRIORITY: i64 = 0;
-const MAX_PRIORITY: i64 = 9;
 
 // Command dispatch table
 const Handler = *const fn (Allocator, []const []const u8) anyerror!void;
@@ -36,7 +33,6 @@ const commands = [_]Command{
     .{ .names = &.{"update"}, .handler = cmdUpdate },
     .{ .names = &.{"close"}, .handler = cmdClose },
     .{ .names = &.{"purge"}, .handler = cmdPurge },
-    .{ .names = &.{"slugify"}, .handler = cmdSlugify },
     .{ .names = &.{"init"}, .handler = cmdInitWrapper },
     .{ .names = &.{ "help", "--help", "-h" }, .handler = cmdHelp },
     .{ .names = &.{ "--version", "-v" }, .handler = cmdVersion },
@@ -198,7 +194,7 @@ const USAGE =
     \\
     \\Commands:
     \\  tsk "title"                  Quick add a task
-    \\  tsk add "title" [options]    Add a task (-p priority, -d desc, -P parent, -a after)
+    \\  tsk add "title" [options]    Add a task (-d desc, -P parent, -a after)
     \\  tsk ls [--status S] [--json] List tasks
     \\  tsk on <id>                  Start working (turn it on!)
     \\  tsk off <id> [-r reason]     Complete ("cross it off")
@@ -213,7 +209,7 @@ const USAGE =
     \\
     \\Examples:
     \\  tsk "Fix the bug"
-    \\  tsk add "Design API" -p 1 -d "REST endpoints"
+    \\  tsk add "Design API" -d "REST endpoints"
     \\  tsk add "Implement" -P tsk-1 -a tsk-2
     \\  tsk on tsk-3
     \\  tsk off tsk-3 -r "shipped"
@@ -264,7 +260,6 @@ fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
 
     var title: []const u8 = "";
     var description: []const u8 = "";
-    var priority: i64 = default_priority;
     var parent: ?[]const u8 = null;
     var after: ?[]const u8 = null; // -a: creates blocks dependency
     var position_after: ?[]const u8 = null; // --after: positioning
@@ -272,10 +267,7 @@ fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (getArg(args, &i, "-p")) |v| {
-            const p = std.fmt.parseInt(i64, v, 10) catch fatal("Invalid priority: {s}\n", .{v});
-            priority = std.math.clamp(p, MIN_PRIORITY, MAX_PRIORITY);
-        } else if (getArg(args, &i, "-d")) |v| {
+        if (getArg(args, &i, "-d")) |v| {
             description = v;
         } else if (getArg(args, &i, "-P")) |v| {
             parent = v;
@@ -307,7 +299,7 @@ fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
     const prefix = try storage_mod.getOrCreatePrefix(allocator, &storage);
     defer allocator.free(prefix);
 
-    const id = try storage_mod.generateIdWithTitle(allocator, prefix, title);
+    const id = try storage_mod.generateId(allocator, prefix);
     defer allocator.free(id);
 
     var ts_buf: [40]u8 = undefined;
@@ -391,7 +383,6 @@ fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
         .title = title,
         .description = description,
         .status = .open,
-        .priority = priority,
         .issue_type = "task",
         .assignee = null,
         .created_at = now,
@@ -550,11 +541,10 @@ fn cmdShow(allocator: Allocator, args: []const []const u8) !void {
     defer iss.deinit(allocator);
 
     const w = stdout();
-    try w.print("ID:       {s}\nTitle:    {s}\nStatus:   {s}\nPriority: {d}\n", .{
+    try w.print("ID:       {s}\nTitle:    {s}\nStatus:   {s}\n", .{
         iss.id,
         iss.title,
         iss.status.display(),
-        iss.priority,
     });
     if (iss.description.len > 0) try w.print("Desc:     {s}\n", .{iss.description});
     try w.print("Created:  {s}\n", .{iss.created_at});
@@ -742,80 +732,6 @@ fn cmdPurge(allocator: Allocator, _: []const []const u8) !void {
     try stdout().writeAll("Archive purged\n");
 }
 
-fn cmdSlugify(allocator: Allocator, _: []const []const u8) !void {
-    var storage = try openStorage(allocator);
-    defer storage.close();
-
-    const prefix = try storage_mod.getOrCreatePrefix(allocator, &storage);
-    defer allocator.free(prefix);
-
-    // Slugify all issues (including archived)
-    const issues = try storage.listAllIssuesIncludingArchived();
-    defer storage_mod.freeIssues(allocator, issues);
-
-    var count: usize = 0;
-    for (issues) |issue| {
-        const renamed = try slugifyIssue(allocator, &storage, prefix, issue.id, issue.title);
-        if (renamed) {
-            count += 1;
-        }
-    }
-
-    try stdout().print("Slugified {d} issue(s)\n", .{count});
-    try gitAddTsk(allocator);
-}
-
-fn slugifyIssue(allocator: Allocator, storage: *Storage, prefix: []const u8, old_id: []const u8, title: []const u8) !bool {
-    // Generate new slugified ID
-    const slug = try storage_mod.slugify(allocator, title);
-    defer allocator.free(slug);
-
-    // Extract hex suffix from old ID (last 8 chars after last hyphen)
-    var hex_suffix: []const u8 = "";
-    if (std.mem.lastIndexOf(u8, old_id, "-")) |last_hyphen| {
-        const suffix = old_id[last_hyphen + 1 ..];
-        if (suffix.len == 8) {
-            // Validate it's hex
-            var is_hex = true;
-            for (suffix) |c| {
-                if (!std.ascii.isHex(c)) {
-                    is_hex = false;
-                    break;
-                }
-            }
-            if (is_hex) hex_suffix = suffix;
-        }
-    }
-
-    // If no valid hex suffix, generate new one
-    var hex_buf: [8]u8 = undefined;
-    if (hex_suffix.len == 0) {
-        var rand_bytes: [4]u8 = undefined;
-        std.crypto.random.bytes(&rand_bytes);
-        const hex = std.fmt.bytesToHex(rand_bytes, .lower);
-        @memcpy(&hex_buf, &hex);
-        hex_suffix = &hex_buf;
-    }
-
-    const new_id = try std.fmt.allocPrint(allocator, "{s}-{s}-{s}", .{ prefix, slug, hex_suffix });
-    defer allocator.free(new_id);
-
-    // Skip if already slugified (same ID)
-    if (std.mem.eql(u8, old_id, new_id)) {
-        return false;
-    }
-
-    // Check if new ID already exists (collision)
-    if (try storage.issueExists(new_id)) {
-        try stderr().print("Skipping {s}: new ID {s} already exists\n", .{ old_id, new_id });
-        return false;
-    }
-
-    try storage.renameIssue(old_id, new_id);
-    try stdout().print("{s} -> {s}\n", .{ old_id, new_id });
-    return true;
-}
-
 fn formatTimestamp(buf: []u8) ![]const u8 {
     const nanos = std.time.nanoTimestamp();
     if (nanos < 0) return error.InvalidTimestamp;
@@ -851,7 +767,6 @@ const JsonIssue = struct {
     title: []const u8,
     description: ?[]const u8 = null,
     status: []const u8,
-    priority: i64,
     issue_type: []const u8,
     created_at: []const u8,
     closed_at: ?[]const u8 = null,
@@ -865,7 +780,6 @@ fn writeIssueJson(issue: Issue, w: *std.Io.Writer) !void {
         .title = issue.title,
         .description = if (issue.description.len > 0) issue.description else null,
         .status = issue.status.display(),
-        .priority = issue.priority,
         .issue_type = issue.issue_type,
         .created_at = issue.created_at,
         .closed_at = issue.closed_at,
@@ -886,7 +800,6 @@ const JsonlIssue = struct {
     title: []const u8,
     description: ?[]const u8 = null,
     status: []const u8,
-    priority: i64,
     issue_type: []const u8,
     assignee: ?[]const u8 = null,
     created_at: []const u8,
@@ -947,7 +860,6 @@ fn hydrateFromJsonl(allocator: Allocator, storage: *Storage, jsonl_path: []const
             .title = obj.title,
             .description = obj.description orelse "",
             .status = status,
-            .priority = obj.priority,
             .issue_type = obj.issue_type,
             .assignee = obj.assignee,
             .created_at = obj.created_at,

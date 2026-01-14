@@ -357,7 +357,6 @@ pub fn makeTestIssue(id: []const u8, status: Status) Issue {
         .title = id,
         .description = "",
         .status = status,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
@@ -375,17 +374,15 @@ pub const LifecycleOracle = struct {
     // Issue state
     exists: [MAX_ISSUES]bool = [_]bool{false} ** MAX_ISSUES,
     statuses: [MAX_ISSUES]Status = [_]Status{.open} ** MAX_ISSUES,
-    priorities: [MAX_ISSUES]u3 = [_]u3{2} ** MAX_ISSUES,
     has_closed_at: [MAX_ISSUES]bool = [_]bool{false} ** MAX_ISSUES,
     archived: [MAX_ISSUES]bool = [_]bool{false} ** MAX_ISSUES, // Closed root issues get archived
     parents: [MAX_ISSUES]?usize = [_]?usize{null} ** MAX_ISSUES,
     // deps[i][j] = true means i depends on j (j blocks i)
     deps: [MAX_ISSUES][MAX_ISSUES]bool = [_][MAX_ISSUES]bool{[_]bool{false} ** MAX_ISSUES} ** MAX_ISSUES,
 
-    pub fn create(self: *LifecycleOracle, idx: usize, priority: u3, parent: ?usize) void {
+    pub fn create(self: *LifecycleOracle, idx: usize, parent: ?usize) void {
         self.exists[idx] = true;
         self.statuses[idx] = .open;
-        self.priorities[idx] = priority;
         self.has_closed_at[idx] = false;
         self.archived[idx] = false;
         self.parents[idx] = parent;

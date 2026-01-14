@@ -6,7 +6,7 @@ Minimal task tracker for AI coding agents.
 
 ## What is tsk?
 
-A CLI task tracker with **zero dependencies** — tasks are plain markdown files with YAML frontmatter in `.tsk/`. No database, no server, no configuration. Copy the folder between machines, commit to git, edit with any tool. Parent-child relationships map to folders. Each task has an ID, title, status, priority, and optional dependencies.
+A CLI task tracker with **zero dependencies** — tasks are plain markdown files with YAML frontmatter in `.tsk/`. No database, no server, no configuration. Copy the folder between machines, commit to git, edit with any tool. Parent-child relationships map to folders. Each task has an ID, title, status, and optional dependencies.
 
 ## Installation
 
@@ -68,12 +68,11 @@ Creates `.tsk/` directory. Runs `git add .tsk` if in a git repository. Safe to r
 ### Add Task
 
 ```bash
-tsk add "title" [-p PRIORITY] [-d "description"] [-P PARENT_ID] [-a AFTER_ID] [--json]
+tsk add "title" [-d "description"] [-P PARENT_ID] [-a AFTER_ID] [--json]
 tsk "title"  # shorthand for: tsk add "title"
 ```
 
 Options:
-- `-p N`: Priority 0-4 (0 = highest, default 2)
 - `-d "text"`: Long description (markdown body of the file)
 - `-P ID`: Parent task ID (creates folder hierarchy)
 - `-a ID`: Blocked by task ID (dependency)
@@ -81,14 +80,14 @@ Options:
 
 Examples:
 ```bash
-tsk add "Design API" -p 1
-# Output: tsk-1a2b3c4d5e6f7890
+tsk add "Design API"
+# Output: tsk-1a2b3c4d
 
 tsk add "Implement API" -a tsk-1a2b3c4d -d "REST endpoints for user management"
-# Output: tsk-3c4d5e6f7a8b9012
+# Output: tsk-3c4d5e6f
 
 tsk add "Write tests" --json
-# Output: {"id":"tsk-5e6f7a8b9012cdef","title":"Write tests","status":"open","priority":2,...}
+# Output: {"id":"tsk-5e6f7a8b","title":"Write tests","status":"open",...}
 ```
 
 ### List Tasks
@@ -130,10 +129,9 @@ tsk show <id>
 
 Output:
 ```
-ID:       tsk-1a2b3c4d5e6f7890
+ID:       tsk-1a2b3c4d
 Title:    Design API
 Status:   open
-Priority: 1
 Desc:     REST endpoints for user management
 Created:  2024-12-24T10:30:00Z
 ```
@@ -214,12 +212,11 @@ Tasks are stored as markdown files with YAML frontmatter in `.tsk/`:
 ---
 title: Fix the bug
 status: open
-priority: 2
 issue-type: task
 assignee: joel
 created-at: 2024-12-24T10:30:00Z
 blocks:
-  - a3f2b1c8d9e04a7b
+  - a3f2b1c8
 ---
 
 Description as markdown body here.
@@ -227,28 +224,18 @@ Description as markdown body here.
 
 ### ID Format
 
-IDs have the format `{prefix}-{slug}-{hex}` where:
+IDs have the format `{prefix}-{hex}` where:
 - `prefix`: Project prefix from `.tsk/config` (default: `tsk`)
-- `slug`: URL-safe abbreviation of the title (max 32 chars)
 - `hex`: 8-character random hex suffix
 
-Example: `tsk-fix-user-auth-a3f2b1c8`
-
-The slug uses common abbreviations (authentication→auth, configuration→config, etc.) and truncates at word boundaries. Run `tsk slugify` to rename existing IDs to include slugs.
+Example: `tsk-a3f2b1c8`
 
 Commands accept short prefixes:
 
 ```bash
-tsk on a3f2b1    # Matches tsk-fix-user-auth-a3f2b1c8
+tsk on a3f2b1    # Matches tsk-a3f2b1c8
 tsk show a3f     # Error if ambiguous (multiple matches)
 ```
-
-### Slugify
-
-```bash
-tsk slugify
-```
-Renames all issue IDs (including archived) to include slugs based on their titles. Preserves the hex suffix and updates all dependency references.
 
 ### Status Flow
 
@@ -259,14 +246,6 @@ open -> active -> done (archived)
 - `open`: Task created, not started
 - `active`: Currently being worked on
 - `done`: Completed, moved to archive
-
-### Priority Scale
-
-- `0`: Critical
-- `1`: High
-- `2`: Normal (default)
-- `3`: Low
-- `4`: Backlog
 
 ### Dependencies
 

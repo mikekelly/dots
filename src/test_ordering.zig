@@ -26,7 +26,6 @@ test "cli: peer-index ordering for root issues" {
         .title = "Task C",
         .description = "",
         .status = .open,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
@@ -42,7 +41,6 @@ test "cli: peer-index ordering for root issues" {
         .title = "Task A",
         .description = "",
         .status = .open,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
@@ -58,7 +56,6 @@ test "cli: peer-index ordering for root issues" {
         .title = "Task B",
         .description = "",
         .status = .open,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
@@ -94,7 +91,6 @@ test "cli: peer-index ordering for child issues" {
         .title = "Parent Task",
         .description = "",
         .status = .open,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
@@ -111,7 +107,6 @@ test "cli: peer-index ordering for child issues" {
         .title = "Child C",
         .description = "",
         .status = .open,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
@@ -127,7 +122,6 @@ test "cli: peer-index ordering for child issues" {
         .title = "Child A",
         .description = "",
         .status = .open,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
@@ -143,7 +137,6 @@ test "cli: peer-index ordering for child issues" {
         .title = "Child B",
         .description = "",
         .status = .open,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
@@ -165,7 +158,7 @@ test "cli: peer-index ordering for child issues" {
     try std.testing.expectEqualStrings("child-c", children[2].issue.id);
 }
 
-test "cli: peer-index collision falls back to priority then created_at" {
+test "cli: peer-index collision falls back to created_at" {
     const allocator = std.testing.allocator;
 
     const test_dir = setupTestDirOrPanic(allocator);
@@ -173,13 +166,12 @@ test "cli: peer-index collision falls back to priority then created_at" {
 
     var ts = openTestStorage(allocator, test_dir);
 
-    // Same peer_index, different priorities - should sort by priority
-    const issue_low_pri = Issue{
-        .id = "low-pri",
-        .title = "Low Priority",
+    // Same peer_index, different created_at - should sort by created_at
+    const issue_older = Issue{
+        .id = "older",
+        .title = "Older",
         .description = "",
         .status = .open,
-        .priority = 3, // Lower priority (higher number)
         .issue_type = "task",
         .assignee = null,
         .created_at = "2024-01-01T00:00:00.000000+00:00",
@@ -188,14 +180,13 @@ test "cli: peer-index collision falls back to priority then created_at" {
         .blocks = &.{},
         .peer_index = 1,
     };
-    try ts.storage.createIssue(issue_low_pri, null);
+    try ts.storage.createIssue(issue_older, null);
 
-    const issue_high_pri = Issue{
-        .id = "high-pri",
-        .title = "High Priority",
+    const issue_newer = Issue{
+        .id = "newer",
+        .title = "Newer",
         .description = "",
         .status = .open,
-        .priority = 1, // Higher priority (lower number)
         .issue_type = "task",
         .assignee = null,
         .created_at = "2024-01-02T00:00:00.000000+00:00", // Later creation
@@ -204,39 +195,6 @@ test "cli: peer-index collision falls back to priority then created_at" {
         .blocks = &.{},
         .peer_index = 1, // Same peer_index
     };
-    try ts.storage.createIssue(issue_high_pri, null);
-
-    // Same peer_index and priority, different created_at - should sort by created_at
-    const issue_older = Issue{
-        .id = "older",
-        .title = "Older",
-        .description = "",
-        .status = .open,
-        .priority = 2,
-        .issue_type = "task",
-        .assignee = null,
-        .created_at = "2024-01-01T00:00:00.000000+00:00",
-        .closed_at = null,
-        .close_reason = null,
-        .blocks = &.{},
-        .peer_index = 2,
-    };
-    try ts.storage.createIssue(issue_older, null);
-
-    const issue_newer = Issue{
-        .id = "newer",
-        .title = "Newer",
-        .description = "",
-        .status = .open,
-        .priority = 2, // Same priority
-        .issue_type = "task",
-        .assignee = null,
-        .created_at = "2024-01-02T00:00:00.000000+00:00", // Later
-        .closed_at = null,
-        .close_reason = null,
-        .blocks = &.{},
-        .peer_index = 2, // Same peer_index
-    };
     try ts.storage.createIssue(issue_newer, null);
 
     // Get list and verify order
@@ -244,16 +202,13 @@ test "cli: peer-index collision falls back to priority then created_at" {
     defer storage_mod.freeIssues(allocator, issues);
     ts.deinit();
 
-    try std.testing.expectEqual(@as(usize, 4), issues.len);
-    // peer_index 1: high-pri before low-pri (by priority)
-    try std.testing.expectEqualStrings("high-pri", issues[0].id);
-    try std.testing.expectEqualStrings("low-pri", issues[1].id);
-    // peer_index 2: older before newer (by created_at)
-    try std.testing.expectEqualStrings("older", issues[2].id);
-    try std.testing.expectEqualStrings("newer", issues[3].id);
+    try std.testing.expectEqual(@as(usize, 2), issues.len);
+    // peer_index 1: older before newer (by created_at)
+    try std.testing.expectEqualStrings("older", issues[0].id);
+    try std.testing.expectEqualStrings("newer", issues[1].id);
 }
 
-test "cli: peer-index determines sort order regardless of priority" {
+test "cli: peer-index determines sort order" {
     const allocator = std.testing.allocator;
 
     const test_dir = setupTestDirOrPanic(allocator);
@@ -261,56 +216,50 @@ test "cli: peer-index determines sort order regardless of priority" {
 
     var ts = openTestStorage(allocator, test_dir);
 
-    // Issue without peer_index but high priority
-    const no_index_high = Issue{
-        .id = "no-index-high",
-        .title = "No Index High Pri",
+    const issue_a = Issue{
+        .id = "issue-a",
+        .title = "Issue A",
         .description = "",
         .status = .open,
-        .priority = 0, // Highest priority
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
         .closed_at = null,
         .close_reason = null,
         .blocks = &.{},
-        .peer_index = 200.0, // High peer_index (sorts after others)
+        .peer_index = 200.0,
     };
-    try ts.storage.createIssue(no_index_high, null);
+    try ts.storage.createIssue(issue_a, null);
 
-    // Issue with peer_index but low priority
-    const with_index_low = Issue{
-        .id = "with-index-low",
-        .title = "With Index Low Pri",
+    const issue_b = Issue{
+        .id = "issue-b",
+        .title = "Issue B",
         .description = "",
         .status = .open,
-        .priority = 4, // Lowest priority
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
         .closed_at = null,
         .close_reason = null,
         .blocks = &.{},
-        .peer_index = 100, // Has peer_index
+        .peer_index = 100,
     };
-    try ts.storage.createIssue(with_index_low, null);
+    try ts.storage.createIssue(issue_b, null);
 
-    // Another with high peer_index
-    const no_index_low = Issue{
-        .id = "high-index-low",
-        .title = "High Index Low Pri",
+    const issue_c = Issue{
+        .id = "issue-c",
+        .title = "Issue C",
         .description = "",
         .status = .open,
-        .priority = 4,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
         .closed_at = null,
         .close_reason = null,
         .blocks = &.{},
-        .peer_index = 201.0, // Higher than no_index_high
+        .peer_index = 201.0,
     };
-    try ts.storage.createIssue(no_index_low, null);
+    try ts.storage.createIssue(issue_c, null);
 
     const issues = try ts.storage.listIssues(.open);
     defer storage_mod.freeIssues(allocator, issues);
@@ -318,9 +267,9 @@ test "cli: peer-index determines sort order regardless of priority" {
 
     try std.testing.expectEqual(@as(usize, 3), issues.len);
     // Sorted by peer_index: 100 < 200 < 201
-    try std.testing.expectEqualStrings("with-index-low", issues[0].id); // peer_index 100
-    try std.testing.expectEqualStrings("no-index-high", issues[1].id); // peer_index 200
-    try std.testing.expectEqualStrings("high-index-low", issues[2].id); // peer_index 201
+    try std.testing.expectEqualStrings("issue-b", issues[0].id); // peer_index 100
+    try std.testing.expectEqualStrings("issue-a", issues[1].id); // peer_index 200
+    try std.testing.expectEqualStrings("issue-c", issues[2].id); // peer_index 201
 }
 
 test "cli: --after positions new task between existing tasks" {
@@ -425,7 +374,6 @@ test "cli: --after infers parent from target issue" {
         .title = "Parent Task",
         .description = "",
         .status = .open,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
@@ -442,7 +390,6 @@ test "cli: --after infers parent from target issue" {
         .title = "Child A",
         .description = "",
         .status = .open,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
@@ -629,7 +576,6 @@ test "cli: --before first task prepends at start" {
 test "prop: peer-index ordering invariants" {
     const PeerIndexCase = struct {
         peer_indices: [6]u4, // 0-15
-        priorities: [6]u3, // 0-7
     };
 
     try zc.check(struct {
@@ -642,7 +588,7 @@ test "prop: peer-index ordering invariants" {
             var ts = openTestStorage(allocator, test_dir);
             defer ts.deinit();
 
-            // Create issues with random peer_indices and priorities
+            // Create issues with random peer_indices
             for (0..6) |i| {
                 var id_buf: [16]u8 = undefined;
                 const id = std.fmt.bufPrint(&id_buf, "idx-{d}", .{i}) catch return false;
@@ -655,7 +601,6 @@ test "prop: peer-index ordering invariants" {
                     .title = id,
                     .description = "",
                     .status = .open,
-                    .priority = args.priorities[i] % 5,
                     .issue_type = "task",
                     .assignee = null,
                     .created_at = created_at,
@@ -679,14 +624,9 @@ test "prop: peer-index ordering invariants" {
                 // Invariant 1: peer_index ordering (ascending)
                 if (prev.peer_index > curr.peer_index) return false;
 
-                // Invariant 2: when peer_index is equal, check priority
+                // Invariant 2: when peer_index is equal, check created_at
                 if (prev.peer_index == curr.peer_index) {
-                    if (prev.priority > curr.priority) return false;
-
-                    // Invariant 3: when both equal, check created_at
-                    if (prev.priority == curr.priority) {
-                        if (std.mem.order(u8, prev.created_at, curr.created_at) == .gt) return false;
-                    }
+                    if (std.mem.order(u8, prev.created_at, curr.created_at) == .gt) return false;
                 }
             }
 
@@ -784,7 +724,6 @@ test "storage: bisection with close float values maintains uniqueness" {
         .title = "Task A",
         .description = "",
         .status = .open,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
@@ -800,7 +739,6 @@ test "storage: bisection with close float values maintains uniqueness" {
         .title = "Task B",
         .description = "",
         .status = .open,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
@@ -837,7 +775,6 @@ test "cli: tree output maintains peer-index order in nested hierarchy" {
         .title = "Parent B",
         .description = "",
         .status = .open,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
@@ -853,7 +790,6 @@ test "cli: tree output maintains peer-index order in nested hierarchy" {
         .title = "Parent A",
         .description = "",
         .status = .open,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
@@ -870,7 +806,6 @@ test "cli: tree output maintains peer-index order in nested hierarchy" {
         .title = "Child A2",
         .description = "",
         .status = .open,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
@@ -886,7 +821,6 @@ test "cli: tree output maintains peer-index order in nested hierarchy" {
         .title = "Child A1",
         .description = "",
         .status = .open,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
@@ -903,7 +837,6 @@ test "cli: tree output maintains peer-index order in nested hierarchy" {
         .title = "Child B1",
         .description = "",
         .status = .open,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
@@ -957,7 +890,6 @@ test "cli: --before infers parent from target issue" {
         .title = "Parent Task",
         .description = "",
         .status = .open,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
@@ -974,7 +906,6 @@ test "cli: --before infers parent from target issue" {
         .title = "Child B",
         .description = "",
         .status = .open,
-        .priority = 2,
         .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
