@@ -149,7 +149,6 @@ test "storage: ID prefix resolution" {
         .title = "Test",
         .description = "",
         .status = .open,
-        .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
         .closed_at = null,
@@ -185,7 +184,6 @@ test "storage: ambiguous ID prefix errors" {
         .title = "Test1",
         .description = "",
         .status = .open,
-        .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
         .closed_at = null,
@@ -202,7 +200,6 @@ test "storage: ambiguous ID prefix errors" {
         .title = "Test2",
         .description = "",
         .status = .open,
-        .issue_type = "task",
         .assignee = null,
         .created_at = fixed_timestamp,
         .closed_at = null,
@@ -232,8 +229,6 @@ test "storage: missing required frontmatter fields rejected" {
     const no_title =
         \\---
         \\status: open
-        \\priority: 2
-        \\issue-type: task
         \\created-at: 2024-01-01T00:00:00Z
         \\---
     ;
@@ -248,8 +243,6 @@ test "storage: missing required frontmatter fields rejected" {
         \\---
         \\title: Has title
         \\status: open
-        \\priority: 2
-        \\issue-type: task
         \\---
     ;
     try ts.storage.tsk_dir.writeFile(.{ .sub_path = "no-created.md", .data = no_created });
@@ -272,8 +265,6 @@ test "storage: invalid block id rejected" {
         \\---
         \\title: Bad blocks
         \\status: open
-        \\priority: 2
-        \\issue-type: task
         \\created-at: 2024-01-01T00:00:00Z
         \\blocks:
         \\  - ../nope

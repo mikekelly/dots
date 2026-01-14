@@ -275,11 +275,11 @@ test "prop: update done sets closed_at" {
 
             const expects_closed = oracleUpdateClosed(args.done);
             if (expects_closed) {
-                if (std.mem.indexOf(u8, show.stdout, "Closed:") == null) return false;
-                if (std.mem.indexOf(u8, show.stdout, "Status:   done") == null) return false;
+                if (std.mem.indexOf(u8, show.stdout, "closed-at:") == null) return false;
+                if (std.mem.indexOf(u8, show.stdout, "status: closed") == null) return false;
             } else {
-                if (std.mem.indexOf(u8, show.stdout, "Closed:") != null) return false;
-                if (std.mem.indexOf(u8, show.stdout, "Status:   open") == null) return false;
+                if (std.mem.indexOf(u8, show.stdout, "closed-at:") != null) return false;
+                if (std.mem.indexOf(u8, show.stdout, "status: open") == null) return false;
             }
 
             return true;
@@ -431,8 +431,7 @@ test "prop: lifecycle simulation maintains invariants" {
                                 .title = id,
                                 .description = "",
                                 .status = .open,
-                                .issue_type = "task",
-                                .assignee = null,
+                                                                .assignee = null,
                                 .created_at = fixed_timestamp,
                                 .closed_at = null,
                                 .close_reason = null,
@@ -548,8 +547,7 @@ test "prop: transitive blocking chains" {
                     .title = ids[i],
                     .description = "",
                     .status = status,
-                    .issue_type = "task",
-                    .assignee = null,
+                                        .assignee = null,
                     .created_at = fixed_timestamp,
                     .closed_at = closed_at,
                     .close_reason = null,
@@ -614,8 +612,7 @@ test "prop: parent-child close constraint" {
                 .title = "Parent",
                 .description = "",
                 .status = .open,
-                .issue_type = "task",
-                .assignee = null,
+                                .assignee = null,
                 .created_at = fixed_timestamp,
                 .closed_at = null,
                 .close_reason = null,
@@ -637,8 +634,7 @@ test "prop: parent-child close constraint" {
                     .title = id,
                     .description = "",
                     .status = if (is_closed) .closed else .open,
-                    .issue_type = "task",
-                    .assignee = null,
+                                        .assignee = null,
                     .created_at = fixed_timestamp,
                     .closed_at = if (is_closed) fixed_timestamp else null,
                     .close_reason = null,
@@ -694,8 +690,7 @@ test "prop: status transition state machine" {
                 .title = "Transition Test",
                 .description = "",
                 .status = .open,
-                .issue_type = "task",
-                .assignee = null,
+                                .assignee = null,
                 .created_at = fixed_timestamp,
                 .closed_at = null,
                 .close_reason = null,
@@ -780,8 +775,7 @@ test "prop: search finds exactly matching issues" {
                     .title = title_buf[0..len],
                     .description = "",
                     .status = .open,
-                    .issue_type = "task",
-                    .assignee = null,
+                                        .assignee = null,
                     .created_at = fixed_timestamp,
                     .closed_at = null,
                     .close_reason = null,

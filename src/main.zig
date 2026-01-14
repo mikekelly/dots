@@ -296,10 +296,7 @@ fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
     var storage = try openStorage(allocator);
     defer storage.close();
 
-    const prefix = try storage_mod.getOrCreatePrefix(allocator, &storage);
-    defer allocator.free(prefix);
-
-    const id = try storage_mod.generateId(allocator, prefix);
+    const id = try storage_mod.generateId(allocator);
     defer allocator.free(id);
 
     var ts_buf: [40]u8 = undefined;
@@ -383,7 +380,6 @@ fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
         .title = title,
         .description = description,
         .status = .open,
-        .issue_type = "task",
         .assignee = null,
         .created_at = now,
         .closed_at = null,
@@ -537,19 +533,10 @@ fn cmdShow(allocator: Allocator, args: []const []const u8) !void {
     const resolved = resolveIdOrFatal(&storage, args[0]);
     defer allocator.free(resolved);
 
-    const iss = try storage.getIssue(resolved) orelse fatal("Issue not found: {s}\n", .{args[0]});
-    defer iss.deinit(allocator);
+    const content = try storage.getIssueRaw(resolved) orelse fatal("Issue not found: {s}\n", .{args[0]});
+    defer allocator.free(content);
 
-    const w = stdout();
-    try w.print("ID:       {s}\nTitle:    {s}\nStatus:   {s}\n", .{
-        iss.id,
-        iss.title,
-        iss.status.display(),
-    });
-    if (iss.description.len > 0) try w.print("Desc:     {s}\n", .{iss.description});
-    try w.print("Created:  {s}\n", .{iss.created_at});
-    if (iss.closed_at) |ca| try w.print("Closed:   {s}\n", .{ca});
-    if (iss.close_reason) |r| try w.print("Reason:   {s}\n", .{r});
+    try stdout().writeAll(content);
 }
 
 fn cmdTree(allocator: Allocator, args: []const []const u8) !void {
@@ -767,7 +754,6 @@ const JsonIssue = struct {
     title: []const u8,
     description: ?[]const u8 = null,
     status: []const u8,
-    issue_type: []const u8,
     created_at: []const u8,
     closed_at: ?[]const u8 = null,
     close_reason: ?[]const u8 = null,
@@ -780,7 +766,6 @@ fn writeIssueJson(issue: Issue, w: *std.Io.Writer) !void {
         .title = issue.title,
         .description = if (issue.description.len > 0) issue.description else null,
         .status = issue.status.display(),
-        .issue_type = issue.issue_type,
         .created_at = issue.created_at,
         .closed_at = issue.closed_at,
         .close_reason = issue.close_reason,
@@ -800,7 +785,7 @@ const JsonlIssue = struct {
     title: []const u8,
     description: ?[]const u8 = null,
     status: []const u8,
-    issue_type: []const u8,
+    issue_type: ?[]const u8 = null, // ignored, kept for backward compatibility
     assignee: ?[]const u8 = null,
     created_at: []const u8,
     updated_at: ?[]const u8 = null,
@@ -860,7 +845,6 @@ fn hydrateFromJsonl(allocator: Allocator, storage: *Storage, jsonl_path: []const
             .title = obj.title,
             .description = obj.description orelse "",
             .status = status,
-            .issue_type = obj.issue_type,
             .assignee = obj.assignee,
             .created_at = obj.created_at,
             .closed_at = obj.closed_at,

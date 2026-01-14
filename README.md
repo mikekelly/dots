@@ -16,13 +16,13 @@ tsk init
 
 # Add tasks
 tsk "Build auth system"
-# Output: tsk-a1b2c3d4
+# Output: a1b2c3d4
 
 tsk add "Design schema" -P a1b2c3d4
-# Output: tsk-e5f6a7b8
+# Output: e5f6a7b8
 
 tsk add "Implement endpoints" -P a1b2c3d4
-# Output: tsk-c9d0e1f2
+# Output: c9d0e1f2
 
 # View hierarchy
 tsk tree
@@ -86,13 +86,13 @@ Options:
 Examples:
 ```bash
 tsk add "Design API"
-# Output: tsk-1a2b3c4d
+# Output: 1a2b3c4d
 
 tsk add "Implement API" -a 1a2b3c4d -d "REST endpoints for user management"
-# Output: tsk-3c4d5e6f
+# Output: 3c4d5e6f
 
 tsk add "Write tests" --json
-# Output: {"id":"tsk-5e6f7a8b","title":"Write tests","status":"open",...}
+# Output: {"id":"5e6f7a8b","title":"Write tests","status":"open",...}
 ```
 
 ### Start Working
@@ -115,13 +115,16 @@ Marks task(s) as `done` and archives them. Optional reason applies to all. Root 
 tsk show <id>
 ```
 
-Output:
-```
-ID:       tsk-1a2b3c4d
-Title:    Design API
-Status:   open
-Desc:     REST endpoints for user management
-Created:  2024-12-24T10:30:00Z
+Outputs the raw task file (YAML frontmatter + markdown description):
+```markdown
+---
+title: Design API
+status: open
+created-at: 2024-12-24T10:30:00Z
+peer-index: 0
+---
+
+REST endpoints for user management
 ```
 
 ### Remove Task
@@ -191,7 +194,6 @@ Tasks are stored as markdown files with YAML frontmatter in `.tsk/`:
     f7a8b9c0/                 # Archived tree
       f7a8b9c0.md
       a1b2c3d4.md
-  config                      # ID prefix setting
 ```
 
 ### File Format
@@ -200,7 +202,6 @@ Tasks are stored as markdown files with YAML frontmatter in `.tsk/`:
 ---
 title: Fix the bug
 status: open
-issue-type: task
 assignee: joel
 created-at: 2024-12-24T10:30:00Z
 blocks:
@@ -212,16 +213,12 @@ Description as markdown body here.
 
 ### ID Format
 
-IDs have the format `{prefix}-{hex}` where:
-- `prefix`: Project prefix from `.tsk/config` (default: `tsk`)
-- `hex`: 8-character random hex suffix
-
-Example: `tsk-a3f2b1c8`
+IDs are 8-character random hex strings: `a3f2b1c8`
 
 Commands accept short prefixes:
 
 ```bash
-tsk on a3f2b1    # Matches tsk-a3f2b1c8
+tsk on a3f2b1    # Matches a3f2b1c8
 tsk show a3f     # Error if ambiguous (multiple matches)
 ```
 

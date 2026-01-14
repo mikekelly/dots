@@ -282,8 +282,7 @@ test "cli: find searches archive fields and orders results" {
         .title = "Open task",
         .description = "",
         .status = .open,
-        .issue_type = "task",
-        .assignee = null,
+                .assignee = null,
         .created_at = "2024-03-01T00:00:00Z",
         .closed_at = null,
         .close_reason = null,
@@ -297,8 +296,7 @@ test "cli: find searches archive fields and orders results" {
         .title = "Closed task",
         .description = "",
         .status = .closed,
-        .issue_type = "task",
-        .assignee = null,
+                .assignee = null,
         .created_at = "2024-01-01T00:00:00Z",
         .closed_at = "2024-02-01T00:00:00Z",
         .close_reason = "wontfix",
@@ -394,7 +392,7 @@ test "cli: jsonl hydration imports issues and archives closed" {
         title: []const u8,
         description: ?[]const u8 = null,
         status: []const u8,
-        issue_type: []const u8,
+        issue_type: ?[]const u8 = null, // ignored, kept for backward compatibility
         assignee: ?[]const u8 = null,
         created_at: []const u8,
         updated_at: ?[]const u8 = null,
@@ -408,38 +406,33 @@ test "cli: jsonl hydration imports issues and archives closed" {
             .id = "parent",
             .title = "Parent",
             .status = "open",
-            .issue_type = "task",
-            .created_at = fixed_timestamp,
+                        .created_at = fixed_timestamp,
         },
         .{
             .id = "child",
             .title = "Child",
             .status = "open",
-                .issue_type = "task",
-            .created_at = fixed_timestamp,
+                            .created_at = fixed_timestamp,
             .dependencies = &.{.{ .depends_on_id = "parent", .type = "parent-child" }},
         },
         .{
             .id = "blocker",
             .title = "Blocker",
             .status = "open",
-                .issue_type = "task",
-            .created_at = fixed_timestamp,
+                            .created_at = fixed_timestamp,
         },
         .{
             .id = "blocked",
             .title = "Blocked",
             .status = "open",
-            .issue_type = "task",
-            .created_at = fixed_timestamp,
+                        .created_at = fixed_timestamp,
             .dependencies = &.{.{ .depends_on_id = "blocker", .type = "blocks" }},
         },
         .{
             .id = "closed",
             .title = "Closed",
             .status = "done",
-            .issue_type = "task",
-            .created_at = fixed_timestamp,
+                        .created_at = fixed_timestamp,
             .closed_at = fixed_timestamp,
         },
     };
@@ -616,8 +609,6 @@ test "cli: tree ignores missing parent" {
         \\---
         \\title: Orphan child
         \\status: open
-        \\priority: 2
-        \\issue-type: task
         \\created-at: 2024-01-01T00:00:00Z
         \\---
     ;
@@ -673,8 +664,6 @@ test "cli: fix promotes orphan children" {
         \\---
         \\title: Orphan child
         \\status: open
-        \\priority: 2
-        \\issue-type: task
         \\created-at: 2024-01-01T00:00:00Z
         \\---
     ;

@@ -9,7 +9,6 @@ const ARCHIVE_DIR = ".tsk/archive";
 const MAX_PATH_LEN = 512; // Maximum path length for file operations
 const MAX_ID_LEN = 128; // Maximum ID length (validated in validateId)
 const MAX_ISSUE_FILE_SIZE = 1024 * 1024; // 1MB max issue file
-const MAX_CONFIG_SIZE = 64 * 1024; // 64KB max config file
 
 // Errors
 pub const StorageError = error{
@@ -117,7 +116,6 @@ pub const Issue = struct {
     title: []const u8,
     description: []const u8,
     status: Status,
-    issue_type: []const u8,
     assignee: ?[]const u8,
     created_at: []const u8,
     closed_at: ?[]const u8,
@@ -142,7 +140,6 @@ pub const Issue = struct {
             .title = self.title,
             .description = self.description,
             .status = status,
-            .issue_type = self.issue_type,
             .assignee = self.assignee,
             .created_at = self.created_at,
             .closed_at = closed_at,
@@ -160,7 +157,6 @@ pub const Issue = struct {
             .title = self.title,
             .description = self.description,
             .status = self.status,
-            .issue_type = self.issue_type,
             .assignee = self.assignee,
             .created_at = self.created_at,
             .closed_at = self.closed_at,
@@ -181,9 +177,6 @@ pub const Issue = struct {
 
         const description = try allocator.dupe(u8, self.description);
         errdefer allocator.free(description);
-
-        const issue_type = try allocator.dupe(u8, self.issue_type);
-        errdefer allocator.free(issue_type);
 
         const assignee = if (self.assignee) |a| try allocator.dupe(u8, a) else null;
         errdefer if (assignee) |a| allocator.free(a);
@@ -215,7 +208,6 @@ pub const Issue = struct {
             .title = title,
             .description = description,
             .status = self.status,
-            .issue_type = issue_type,
             .assignee = assignee,
             .created_at = created_at,
             .closed_at = closed_at,
@@ -230,7 +222,6 @@ pub const Issue = struct {
         allocator.free(self.id);
         allocator.free(self.title);
         allocator.free(self.description);
-        allocator.free(self.issue_type);
         if (self.assignee) |s| allocator.free(s);
         allocator.free(self.created_at);
         if (self.closed_at) |s| allocator.free(s);
@@ -324,7 +315,6 @@ pub fn freeOrphanParents(allocator: Allocator, orphans: []const []const u8) void
 const Frontmatter = struct {
     title: []const u8 = "",
     status: Status = .open,
-    issue_type: []const u8 = "task",
     assignee: ?[]const u8 = null,
     created_at: []const u8 = "",
     closed_at: ?[]const u8 = null,
@@ -351,7 +341,6 @@ const ParseResult = struct {
 const FrontmatterField = enum {
     title,
     status,
-    issue_type,
     assignee,
     created_at,
     closed_at,
@@ -363,7 +352,6 @@ const FrontmatterField = enum {
 const frontmatter_field_map = std.StaticStringMap(FrontmatterField).initComptime(.{
     .{ "title", .title },
     .{ "status", .status },
-    .{ "issue-type", .issue_type },
     .{ "assignee", .assignee },
     .{ "created-at", .created_at },
     .{ "closed-at", .closed_at },
@@ -489,7 +477,6 @@ fn parseFrontmatter(allocator: Allocator, content: []const u8) !ParseResult {
                 allocated_title = parsed.getOwned();
             },
             .status => fm.status = Status.parse(value) orelse return StorageError.InvalidStatus,
-            .issue_type => fm.issue_type = value,
             .assignee => fm.assignee = if (value.len > 0) value else null,
             .created_at => fm.created_at = value,
             .closed_at => fm.closed_at = if (value.len > 0) value else null,
@@ -564,8 +551,6 @@ fn serializeFrontmatter(allocator: Allocator, issue: Issue) ![]u8 {
     try writeYamlValue(&buf, allocator, issue.title);
     try buf.appendSlice(allocator, "\nstatus: ");
     try buf.appendSlice(allocator, issue.status.toString());
-    try buf.appendSlice(allocator, "\nissue-type: ");
-    try writeYamlValue(&buf, allocator, issue.issue_type);
 
     if (issue.assignee) |assignee| {
         try buf.appendSlice(allocator, "\nassignee: ");
@@ -609,35 +594,14 @@ fn serializeFrontmatter(allocator: Allocator, issue: Issue) ![]u8 {
     return buf.toOwnedSlice(allocator);
 }
 
-// ID generation - {prefix}-{8 hex chars}
-pub fn generateId(allocator: Allocator, prefix: []const u8) ![]u8 {
+// ID generation - 8 hex chars
+pub fn generateId(allocator: Allocator) ![]u8 {
     var rand_bytes: [4]u8 = undefined;
     std.crypto.random.bytes(&rand_bytes);
     const hex = std.fmt.bytesToHex(rand_bytes, .lower);
-    return std.fmt.allocPrint(allocator, "{s}-{s}", .{ prefix, hex });
+    return allocator.dupe(u8, &hex);
 }
 
-pub fn getOrCreatePrefix(allocator: Allocator, storage: *Storage) ![]const u8 {
-    // Try to get prefix from config
-    if (try storage.getConfig("prefix")) |prefix| {
-        return prefix;
-    }
-
-    // Auto-detect from directory name
-    const cwd = fs.cwd();
-    var path_buf: [fs.max_path_bytes]u8 = undefined;
-    const path = try cwd.realpath(".", &path_buf);
-    const basename = fs.path.basename(path);
-
-    // Strip trailing hyphens
-    var prefix = std.mem.trimRight(u8, basename, "-");
-    if (prefix.len == 0) prefix = "tsk";
-
-    // Store it in config for future use
-    try storage.setConfig("prefix", prefix);
-
-    return allocator.dupe(u8, prefix);
-}
 
 pub const Storage = struct {
     allocator: Allocator,
@@ -872,6 +836,22 @@ pub const Storage = struct {
         return try self.readIssueFromPath(path, id);
     }
 
+    /// Returns raw file contents for an issue (frontmatter + description)
+    pub fn getIssueRaw(self: *Self, id: []const u8) !?[]const u8 {
+        try validateId(id);
+
+        const path = self.findIssuePath(id) catch |err| switch (err) {
+            StorageError.IssueNotFound => return null,
+            else => return err,
+        };
+        defer self.allocator.free(path);
+
+        const file = try self.tsk_dir.openFile(path, .{});
+        defer file.close();
+
+        return try file.readToEndAlloc(self.allocator, MAX_ISSUE_FILE_SIZE);
+    }
+
     fn readIssueFromPath(self: *Self, path: []const u8, id: []const u8) !Issue {
         const file = try self.tsk_dir.openFile(path, .{});
         defer file.close();
@@ -902,9 +882,6 @@ pub const Storage = struct {
         const description = try self.allocator.dupe(u8, parsed.description);
         errdefer self.allocator.free(description);
 
-        const issue_type = try self.allocator.dupe(u8, parsed.frontmatter.issue_type);
-        errdefer self.allocator.free(issue_type);
-
         const assignee = if (parsed.frontmatter.assignee) |a| try self.allocator.dupe(u8, a) else null;
         errdefer if (assignee) |a| self.allocator.free(a);
 
@@ -924,7 +901,6 @@ pub const Storage = struct {
             .title = title,
             .description = description,
             .status = parsed.frontmatter.status,
-            .issue_type = issue_type,
             .assignee = assignee,
             .created_at = created_at,
             .closed_at = closed_at,
@@ -1215,7 +1191,6 @@ pub const Storage = struct {
             .title = issue.title,
             .description = issue.description,
             .status = issue.status,
-            .issue_type = issue.issue_type,
             .assignee = issue.assignee,
             .created_at = issue.created_at,
             .closed_at = issue.closed_at,
@@ -1986,94 +1961,4 @@ pub const Storage = struct {
         };
     }
 
-    // Config stored in .tsk/config as simple key=value lines
-    pub fn getConfig(self: *Self, key: []const u8) !?[]const u8 {
-        const file = self.tsk_dir.openFile("config", .{}) catch |err| switch (err) {
-            error.FileNotFound => return null,
-            else => return err,
-        };
-        defer file.close();
-
-        const content = try file.readToEndAlloc(self.allocator, MAX_CONFIG_SIZE);
-        defer self.allocator.free(content);
-
-        var lines = std.mem.splitScalar(u8, content, '\n');
-        while (lines.next()) |line| {
-            const eq_idx = std.mem.indexOf(u8, line, "=") orelse continue;
-            if (std.mem.eql(u8, line[0..eq_idx], key)) {
-                return try self.allocator.dupe(u8, line[eq_idx + 1 ..]);
-            }
-        }
-
-        return null;
-    }
-
-    pub fn setConfig(self: *Self, key: []const u8, value: []const u8) !void {
-        // Read existing config
-        var config = std.StringHashMap([]const u8).init(self.allocator);
-        defer {
-            var iter = config.iterator();
-            while (iter.next()) |entry| {
-                self.allocator.free(entry.key_ptr.*);
-                self.allocator.free(entry.value_ptr.*);
-            }
-            config.deinit();
-        }
-
-        const file = self.tsk_dir.openFile("config", .{}) catch |err| switch (err) {
-            error.FileNotFound => null,
-            else => return err,
-        };
-
-        if (file) |f| {
-            defer f.close();
-            const content = try f.readToEndAlloc(self.allocator, MAX_CONFIG_SIZE);
-            defer self.allocator.free(content);
-
-            var lines = std.mem.splitScalar(u8, content, '\n');
-            while (lines.next()) |line| {
-                const eq_idx = std.mem.indexOf(u8, line, "=") orelse continue;
-                const k = try self.allocator.dupe(u8, line[0..eq_idx]);
-                const v = self.allocator.dupe(u8, line[eq_idx + 1 ..]) catch |err| {
-                    self.allocator.free(k);
-                    return err;
-                };
-                const result = config.fetchPut(k, v) catch |err| {
-                    self.allocator.free(k);
-                    self.allocator.free(v);
-                    return err;
-                };
-                // Free old entry if duplicate key in file
-                if (result) |old| {
-                    self.allocator.free(old.key);
-                    self.allocator.free(old.value);
-                }
-            }
-        }
-
-        // Update or add key
-        if (config.fetchRemove(key)) |removed| {
-            self.allocator.free(removed.key);
-            self.allocator.free(removed.value);
-        }
-        const k = try self.allocator.dupe(u8, key);
-        errdefer self.allocator.free(k);
-        const v = try self.allocator.dupe(u8, value);
-        errdefer self.allocator.free(v);
-        try config.put(k, v);
-
-        // Build config content
-        var buf: std.ArrayList(u8) = .{};
-        defer buf.deinit(self.allocator);
-
-        var iter = config.iterator();
-        while (iter.next()) |entry| {
-            try buf.appendSlice(self.allocator, entry.key_ptr.*);
-            try buf.append(self.allocator, '=');
-            try buf.appendSlice(self.allocator, entry.value_ptr.*);
-            try buf.append(self.allocator, '\n');
-        }
-
-        try writeFileAtomic(self.tsk_dir, "config", buf.items);
-    }
 };

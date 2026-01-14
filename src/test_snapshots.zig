@@ -83,7 +83,6 @@ test "snap: markdown frontmatter format" {
         \\  "---
         \\title: Test snapshot task
         \\status: open
-        \\issue-type: task
         \\created-at: <TIMESTAMP>
         \\peer-index: 0
         \\---
