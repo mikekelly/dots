@@ -297,6 +297,9 @@ fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
     if (position_after != null and position_before != null) {
         fatal("Error: cannot use both --after and --before\n", .{});
     }
+    if (parent != null and (position_after != null or position_before != null)) {
+        fatal("Error: cannot use -P with --after/--before (parent is inferred from position target)\n", .{});
+    }
 
     var storage = try openStorage(allocator);
     defer storage.close();

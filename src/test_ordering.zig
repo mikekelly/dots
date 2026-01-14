@@ -7,6 +7,7 @@ const Issue = h.Issue;
 const fixed_timestamp = h.fixed_timestamp;
 const runDot = h.runDot;
 const trimNewline = h.trimNewline;
+const isExitCode = h.isExitCode;
 const setupTestDirOrPanic = h.setupTestDirOrPanic;
 const cleanupTestDirAndFree = h.cleanupTestDirAndFree;
 const openTestStorage = h.openTestStorage;
@@ -1084,4 +1085,58 @@ test "prop: repeated bisection produces unique indices" {
             return true;
         }
     }.property, .{ .iterations = 30, .seed = 0xCAFE });
+}
+
+test "cli: -P with --after is rejected" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+        std.debug.panic("init: {}", .{err});
+    };
+    defer init.deinit(allocator);
+
+    const task = runDot(allocator, &.{ "add", "First task" }, test_dir) catch |err| {
+        std.debug.panic("add: {}", .{err});
+    };
+    defer task.deinit(allocator);
+    const task_id = trimNewline(task.stdout);
+
+    // Try to use both -P and --after - should fail
+    const result = runDot(allocator, &.{ "add", "New task", "-P", task_id, "--after", task_id }, test_dir) catch |err| {
+        std.debug.panic("add with -P and --after: {}", .{err});
+    };
+    defer result.deinit(allocator);
+
+    try std.testing.expect(!isExitCode(result.term, 0));
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "cannot use -P with --after/--before") != null);
+}
+
+test "cli: -P with --before is rejected" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = setupTestDirOrPanic(allocator);
+    defer cleanupTestDirAndFree(allocator, test_dir);
+
+    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+        std.debug.panic("init: {}", .{err});
+    };
+    defer init.deinit(allocator);
+
+    const task = runDot(allocator, &.{ "add", "First task" }, test_dir) catch |err| {
+        std.debug.panic("add: {}", .{err});
+    };
+    defer task.deinit(allocator);
+    const task_id = trimNewline(task.stdout);
+
+    // Try to use both -P and --before - should fail
+    const result = runDot(allocator, &.{ "add", "New task", "-P", task_id, "--before", task_id }, test_dir) catch |err| {
+        std.debug.panic("add with -P and --before: {}", .{err});
+    };
+    defer result.deinit(allocator);
+
+    try std.testing.expect(!isExitCode(result.term, 0));
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "cannot use -P with --after/--before") != null);
 }
