@@ -8,6 +8,35 @@ Minimal task tracker for AI coding agents.
 
 A CLI task tracker with **zero dependencies** — tasks are plain markdown files with YAML frontmatter in `.tsk/`. No database, no server, no configuration. Copy the folder between machines, commit to git, edit with any tool. Parent-child relationships map to folders. Each task has an ID, title, status, and optional dependencies.
 
+## Quick Start
+
+```bash
+# Initialize in current directory
+tsk init
+
+# Add tasks
+tsk "Build auth system"
+# Output: tsk-a1b2c3d4
+
+tsk add "Design schema" -P a1b2c3d4
+# Output: tsk-e5f6a7b8
+
+tsk add "Implement endpoints" -P a1b2c3d4
+# Output: tsk-c9d0e1f2
+
+# View hierarchy
+tsk tree
+# [a1b2c3d4] o Build auth system
+#   +- [e5f6a7b8] o Design schema
+#   +- [c9d0e1f2] o Implement endpoints
+
+# Start working
+tsk on e5f6a7b8
+
+# Complete task
+tsk off e5f6a7b8 -r "Schema finalized"
+```
+
 ## Installation
 
 ### Homebrew
@@ -30,30 +59,6 @@ cp zig-out/bin/tsk ~/.local/bin/
 ```bash
 tsk --version
 # Output: tsk 0.6.3
-```
-
-## Quick Start
-
-```bash
-# Initialize in current directory
-tsk init
-# Creates: .tsk/ directory (added to git if in repo)
-
-# Add a task
-tsk add "Fix the login bug"
-# Output: tsk-a1b2c3d4e5f6a7b8
-
-# List tasks
-tsk ls
-# Output: [a1b2c3d] o Fix the login bug
-
-# Start working
-tsk on a1b2c3d
-# Output: (none, task marked active)
-
-# Complete task
-tsk off a1b2c3d -r "Fixed in commit abc123"
-# Output: (none, task marked done and archived)
 ```
 
 ## Command Reference
@@ -83,28 +88,11 @@ Examples:
 tsk add "Design API"
 # Output: tsk-1a2b3c4d
 
-tsk add "Implement API" -a tsk-1a2b3c4d -d "REST endpoints for user management"
+tsk add "Implement API" -a 1a2b3c4d -d "REST endpoints for user management"
 # Output: tsk-3c4d5e6f
 
 tsk add "Write tests" --json
 # Output: {"id":"tsk-5e6f7a8b","title":"Write tests","status":"open",...}
-```
-
-### List Tasks
-
-```bash
-tsk ls [--status STATUS] [--json]
-```
-
-Options:
-- `--status`: Filter by `open`, `active`, or `done` (default: shows open + active)
-- `--json`: Output as JSON array
-
-Output format (text):
-```
-[1a2b3c4] o Design API        # o = open
-[3c4d5e6] > Implement API     # > = active
-[5e6f7a8] x Write tests       # x = done
 ```
 
 ### Start Working
@@ -143,13 +131,6 @@ tsk rm <id> [id2 ...]
 ```
 Permanently deletes task file(s). If removing a parent, children are also deleted.
 
-### Show Ready Tasks
-
-```bash
-tsk ready [--json]
-```
-Lists tasks that are `open` and have no blocking dependencies (or blocker is `done`).
-
 ### Show Hierarchy
 
 ```bash
@@ -161,11 +142,18 @@ With `id`: shows that specific task's tree (including closed children).
 
 Output:
 ```
-[1a2b3c4] o Build auth system
-  +- [2b3c4d5] o Design schema
-  +- [3c4d5e6] o Implement endpoints (blocked)
-  +- [4d5e6f7] o Write tests (blocked)
+[a1b2c3d4] o Build auth system
+  +- [e5f6a7b8] o Design schema
+  +- [c9d0e1f2] o Implement endpoints (blocked)
+  +- [d3e4f5a6] o Write tests (blocked)
 ```
+
+### Show Ready Tasks
+
+```bash
+tsk ready [--json]
+```
+Lists tasks that are `open` and have no blocking dependencies (or blocker is `done`).
 
 ### Fix Orphans
 
@@ -194,16 +182,16 @@ Tasks are stored as markdown files with YAML frontmatter in `.tsk/`:
 
 ```
 .tsk/
-  a1b2c3d4e5f6a7b8.md              # Root task (no children)
-  f9e8d7c6b5a49382/                # Parent with children
-    f9e8d7c6b5a49382.md            # Parent task file
-    1a2b3c4d5e6f7890.md            # Child task
-  archive/                          # Closed tasks
-    oldtask12345678.md             # Archived root task
-    oldparent1234567/              # Archived tree
-      oldparent1234567.md
-      oldchild23456789.md
-  config                            # ID prefix setting
+  a1b2c3d4.md                 # Root task (no children)
+  e5f6a7b8/                   # Parent with children
+    e5f6a7b8.md               # Parent task file
+    c9d0e1f2.md               # Child task
+  archive/                    # Closed tasks
+    d3e4f5a6.md               # Archived root task
+    f7a8b9c0/                 # Archived tree
+      f7a8b9c0.md
+      a1b2c3d4.md
+  config                      # ID prefix setting
 ```
 
 ### File Format
