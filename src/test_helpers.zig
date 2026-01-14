@@ -2,7 +2,7 @@ const std = @import("std");
 const fs = std.fs;
 
 const build_options = @import("build_options");
-pub const dot_binary = build_options.dot_binary;
+pub const tsk_binary = build_options.tsk_binary;
 
 pub const storage_mod = @import("storage.zig");
 pub const zc = @import("zcheck");
@@ -110,11 +110,11 @@ pub fn oracleUpdateClosed(done: bool) bool {
     return done;
 }
 
-pub fn runDot(allocator: std.mem.Allocator, args: []const []const u8, cwd: []const u8) !RunResult {
-    return runDotWithInput(allocator, args, cwd, null);
+pub fn runTsk(allocator: std.mem.Allocator, args: []const []const u8, cwd: []const u8) !RunResult {
+    return runTskWithInput(allocator, args, cwd, null);
 }
 
-pub fn runDotWithInput(
+pub fn runTskWithInput(
     allocator: std.mem.Allocator,
     args: []const []const u8,
     cwd: []const u8,
@@ -123,7 +123,7 @@ pub fn runDotWithInput(
     var argv: std.ArrayList([]const u8) = .{};
     defer argv.deinit(allocator);
 
-    try argv.append(allocator, dot_binary);
+    try argv.append(allocator, tsk_binary);
     for (args) |arg| {
         try argv.append(allocator, arg);
     }
@@ -174,7 +174,7 @@ pub const MultiProcess = struct {
         if (args.len + 1 > MAX_ARGS) return error.TooManyArgs;
 
         // Store args in fixed storage
-        self.argv_storage[self.count][0] = dot_binary;
+        self.argv_storage[self.count][0] = tsk_binary;
         for (args, 0..) |arg, i| {
             self.argv_storage[self.count][i + 1] = arg;
         }
@@ -244,7 +244,7 @@ pub fn setupTestDir(allocator: std.mem.Allocator) ![]const u8 {
     std.crypto.random.bytes(&rand_buf);
 
     const hex = std.fmt.bytesToHex(rand_buf, .lower);
-    const path = try std.fmt.allocPrint(allocator, "/tmp/dots-test-{s}", .{hex});
+    const path = try std.fmt.allocPrint(allocator, "/tmp/tsk-test-{s}", .{hex});
 
     try fs.makeDirAbsolute(path);
     return path;
@@ -288,7 +288,7 @@ pub const TestStorage = struct {
         defer dir.close(); // Close after setAsCwd - we don't need to keep it open
         try dir.setAsCwd();
 
-        // Open storage (creates .dots in test dir)
+        // Open storage (creates .tsk in test dir)
         const storage = Storage.open(allocator) catch |err| {
             // Restore original directory on error
             original_dir.setAsCwd() catch {};

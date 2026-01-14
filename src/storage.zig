@@ -2,8 +2,8 @@ const std = @import("std");
 const fs = std.fs;
 const Allocator = std.mem.Allocator;
 
-pub const DOTS_DIR = ".dots";
-const ARCHIVE_DIR = ".dots/archive";
+pub const TSK_DIR = ".tsk";
+const ARCHIVE_DIR = ".tsk/archive";
 
 // Buffer size constants
 const MAX_PATH_LEN = 512; // Maximum path length for file operations
@@ -869,7 +869,7 @@ pub fn getOrCreatePrefix(allocator: Allocator, storage: *Storage) ![]const u8 {
 
     // Strip trailing hyphens
     var prefix = std.mem.trimRight(u8, basename, "-");
-    if (prefix.len == 0) prefix = "dot";
+    if (prefix.len == 0) prefix = "tsk";
 
     // Store it in config for future use
     try storage.setConfig("prefix", prefix);
@@ -879,13 +879,13 @@ pub fn getOrCreatePrefix(allocator: Allocator, storage: *Storage) ![]const u8 {
 
 pub const Storage = struct {
     allocator: Allocator,
-    dots_dir: fs.Dir,
+    tsk_dir: fs.Dir,
 
     const Self = @This();
 
     pub fn open(allocator: Allocator) !Self {
-        // Create .dots directory if needed
-        fs.cwd().makeDir(DOTS_DIR) catch |err| switch (err) {
+        // Create .tsk directory if needed
+        fs.cwd().makeDir(TSK_DIR) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
@@ -896,16 +896,16 @@ pub const Storage = struct {
             else => return err,
         };
 
-        const dots_dir = try fs.cwd().openDir(DOTS_DIR, .{ .iterate = true });
+        const tsk_dir = try fs.cwd().openDir(TSK_DIR, .{ .iterate = true });
 
         return Self{
             .allocator = allocator,
-            .dots_dir = dots_dir,
+            .tsk_dir = tsk_dir,
         };
     }
 
     pub fn close(self: *Self) void {
-        self.dots_dir.close();
+        self.tsk_dir.close();
     }
 
     // Resolve a short ID prefix to full ID
@@ -913,9 +913,9 @@ pub const Storage = struct {
         var states = [_]ResolveState{.{ .prefix = prefix }};
         errdefer states[0].deinit(self.allocator);
 
-        try self.scanResolve(self.dots_dir, states[0..], null);
+        try self.scanResolve(self.tsk_dir, states[0..], null);
 
-        const archive_dir = self.dots_dir.openDir("archive", .{ .iterate = true }) catch |err| switch (err) {
+        const archive_dir = self.tsk_dir.openDir("archive", .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => null,
             else => return err,
         };
@@ -935,7 +935,7 @@ pub const Storage = struct {
         var states = [_]ResolveState{.{ .prefix = prefix }};
         errdefer states[0].deinit(self.allocator);
 
-        try self.scanResolve(self.dots_dir, states[0..], null);
+        try self.scanResolve(self.tsk_dir, states[0..], null);
 
         if (states[0].ambig) return StorageError.AmbiguousId;
         if (states[0].match == null) return StorageError.IssueNotFound;
@@ -953,9 +953,9 @@ pub const Storage = struct {
             states[i] = .{ .prefix = prefix };
         }
 
-        try self.scanResolve(self.dots_dir, states, null);
+        try self.scanResolve(self.tsk_dir, states, null);
 
-        const archive_dir = self.dots_dir.openDir("archive", .{ .iterate = true }) catch |err| switch (err) {
+        const archive_dir = self.tsk_dir.openDir("archive", .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => null,
             else => return err,
         };
@@ -1025,34 +1025,34 @@ pub const Storage = struct {
     }
 
     fn findIssuePath(self: *Self, id: []const u8) ![]const u8 {
-        // Try direct file: .dots/{id}.md
+        // Try direct file: .tsk/{id}.md
         var path_buf: [MAX_PATH_LEN]u8 = undefined;
         const direct_path = std.fmt.bufPrint(&path_buf, "{s}.md", .{id}) catch return StorageError.IoError;
 
-        if (self.dots_dir.statFile(direct_path)) |_| {
+        if (self.tsk_dir.statFile(direct_path)) |_| {
             return self.allocator.dupe(u8, direct_path);
         } else |_| {}
 
-        // Try folder: .dots/{id}/{id}.md
+        // Try folder: .tsk/{id}/{id}.md
         const folder_path = std.fmt.bufPrint(&path_buf, "{s}/{s}.md", .{ id, id }) catch return StorageError.IoError;
-        if (self.dots_dir.statFile(folder_path)) |_| {
+        if (self.tsk_dir.statFile(folder_path)) |_| {
             return self.allocator.dupe(u8, folder_path);
         } else |_| {}
 
-        // Try in archive: .dots/archive/{id}.md
+        // Try in archive: .tsk/archive/{id}.md
         const archive_path = std.fmt.bufPrint(&path_buf, "archive/{s}.md", .{id}) catch return StorageError.IoError;
-        if (self.dots_dir.statFile(archive_path)) |_| {
+        if (self.tsk_dir.statFile(archive_path)) |_| {
             return self.allocator.dupe(u8, archive_path);
         } else |_| {}
 
-        // Try archive folder: .dots/archive/{id}/{id}.md
+        // Try archive folder: .tsk/archive/{id}/{id}.md
         const archive_folder_path = std.fmt.bufPrint(&path_buf, "archive/{s}/{s}.md", .{ id, id }) catch return StorageError.IoError;
-        if (self.dots_dir.statFile(archive_folder_path)) |_| {
+        if (self.tsk_dir.statFile(archive_folder_path)) |_| {
             return self.allocator.dupe(u8, archive_folder_path);
         } else |_| {}
 
         // Search recursively in all subdirectories
-        return try self.searchForIssue(self.dots_dir, id) orelse StorageError.IssueNotFound;
+        return try self.searchForIssue(self.tsk_dir, id) orelse StorageError.IssueNotFound;
     }
 
     const MAX_SEARCH_DEPTH = 10;
@@ -1111,7 +1111,7 @@ pub const Storage = struct {
     }
 
     fn readIssueFromPath(self: *Self, path: []const u8, id: []const u8) !Issue {
-        const file = try self.dots_dir.openFile(path, .{});
+        const file = try self.tsk_dir.openFile(path, .{});
         defer file.close();
 
         const content = try file.readToEndAlloc(self.allocator, MAX_ISSUE_FILE_SIZE);
@@ -1222,7 +1222,7 @@ pub const Storage = struct {
             break :blk std.fmt.bufPrint(&path_buf, "{s}/{s}.md", .{ pid, issue.id }) catch return StorageError.IoError;
         } else blk: {
             // Check if a folder with this ID exists (child created before parent)
-            const stat = self.dots_dir.statFile(issue.id) catch |err| switch (err) {
+            const stat = self.tsk_dir.statFile(issue.id) catch |err| switch (err) {
                 error.FileNotFound => break :blk std.fmt.bufPrint(&path_buf, "{s}.md", .{issue.id}) catch return StorageError.IoError,
                 else => return err,
             };
@@ -1233,14 +1233,14 @@ pub const Storage = struct {
             break :blk std.fmt.bufPrint(&path_buf, "{s}.md", .{issue.id}) catch return StorageError.IoError;
         };
 
-        try writeFileAtomic(self.dots_dir, path, content);
+        try writeFileAtomic(self.tsk_dir, path, content);
     }
 
     fn ensureParentFolder(self: *Self, parent_id: []const u8) !void {
         var path_buf: [MAX_PATH_LEN]u8 = undefined;
 
         // Check if parent is already a folder
-        self.dots_dir.makeDir(parent_id) catch |err| switch (err) {
+        self.tsk_dir.makeDir(parent_id) catch |err| switch (err) {
             error.PathAlreadyExists => {
                 // Folder exists - check if parent.md exists in root and move it
                 const old_path = std.fmt.bufPrint(&path_buf, "{s}.md", .{parent_id}) catch return StorageError.IoError;
@@ -1248,7 +1248,7 @@ pub const Storage = struct {
                 var new_path_buf: [MAX_PATH_LEN]u8 = undefined;
                 const new_path = std.fmt.bufPrint(&new_path_buf, "{s}/{s}.md", .{ parent_id, parent_id }) catch return StorageError.IoError;
 
-                self.dots_dir.rename(old_path, new_path) catch |err2| switch (err2) {
+                self.tsk_dir.rename(old_path, new_path) catch |err2| switch (err2) {
                     error.FileNotFound => {}, // Parent file not in root, already correct
                     else => return err2,
                 };
@@ -1263,7 +1263,7 @@ pub const Storage = struct {
         var new_path_buf: [MAX_PATH_LEN]u8 = undefined;
         const new_path = std.fmt.bufPrint(&new_path_buf, "{s}/{s}.md", .{ parent_id, parent_id }) catch return StorageError.IoError;
 
-        self.dots_dir.rename(old_path, new_path) catch |err| switch (err) {
+        self.tsk_dir.rename(old_path, new_path) catch |err| switch (err) {
             error.FileNotFound => {}, // Parent file doesn't exist yet, that's fine
             else => return err,
         };
@@ -1301,7 +1301,7 @@ pub const Storage = struct {
         const content = try serializeFrontmatter(self.allocator, issue.withStatus(status, effective_closed_at, effective_close_reason));
         defer self.allocator.free(content);
 
-        try writeFileAtomic(self.dots_dir, path, content);
+        try writeFileAtomic(self.tsk_dir, path, content);
 
         // Handle archiving if closed
         if (status == .closed) {
@@ -1336,7 +1336,7 @@ pub const Storage = struct {
         if (is_folder) {
             // Check all children are closed
             const folder_name = path[0..std.mem.indexOf(u8, path, "/").?];
-            var folder = try self.dots_dir.openDir(folder_name, .{ .iterate = true });
+            var folder = try self.tsk_dir.openDir(folder_name, .{ .iterate = true });
             defer folder.close();
 
             var iter = folder.iterate();
@@ -1357,12 +1357,12 @@ pub const Storage = struct {
             // All children closed, move entire folder
             var archive_path_buf: [MAX_PATH_LEN]u8 = undefined;
             const archive_path = std.fmt.bufPrint(&archive_path_buf, "archive/{s}", .{folder_name}) catch return StorageError.IoError;
-            try self.dots_dir.rename(folder_name, archive_path);
+            try self.tsk_dir.rename(folder_name, archive_path);
         } else {
             // Simple file, move to archive
             var archive_path_buf: [MAX_PATH_LEN]u8 = undefined;
             const archive_path = std.fmt.bufPrint(&archive_path_buf, "archive/{s}", .{path}) catch return StorageError.IoError;
-            try self.dots_dir.rename(path, archive_path);
+            try self.tsk_dir.rename(path, archive_path);
         }
     }
 
@@ -1394,18 +1394,18 @@ pub const Storage = struct {
                 else
                     folder_name;
                 try self.removeChildDependencyReferences(full_folder);
-                try self.dots_dir.deleteTree(full_folder);
+                try self.tsk_dir.deleteTree(full_folder);
                 return;
             }
         }
 
         // Simple file deletion
-        try self.dots_dir.deleteFile(path);
+        try self.tsk_dir.deleteFile(path);
     }
 
     /// Remove dependency references for all children in a folder
     fn removeChildDependencyReferences(self: *Self, folder_name: []const u8) !void {
-        var folder = self.dots_dir.openDir(folder_name, .{ .iterate = true }) catch |err| switch (err) {
+        var folder = self.tsk_dir.openDir(folder_name, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => return,
             else => return err,
         };
@@ -1474,15 +1474,15 @@ pub const Storage = struct {
             const new_path = std.fmt.bufPrint(&new_path_buf, "{s}/{s}.md", .{ new_id, new_id }) catch return StorageError.IoError;
 
             // Rename folder first
-            try self.dots_dir.rename(old_id, new_id);
+            try self.tsk_dir.rename(old_id, new_id);
 
             // Write new content to new path (old file was renamed with folder)
             var old_file_in_new_folder_buf: [MAX_PATH_LEN]u8 = undefined;
             const old_file_in_new_folder = std.fmt.bufPrint(&old_file_in_new_folder_buf, "{s}/{s}.md", .{ new_id, old_id }) catch return StorageError.IoError;
 
             // Write new file before deleting old
-            try writeFileAtomic(self.dots_dir, new_path, content);
-            self.dots_dir.deleteFile(old_file_in_new_folder) catch |err| switch (err) {
+            try writeFileAtomic(self.tsk_dir, new_path, content);
+            self.tsk_dir.deleteFile(old_file_in_new_folder) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => return err,
             };
@@ -1496,8 +1496,8 @@ pub const Storage = struct {
             };
 
             // Write new file first, then delete old
-            try writeFileAtomic(self.dots_dir, new_path, content);
-            self.dots_dir.deleteFile(old_path) catch |err| switch (err) {
+            try writeFileAtomic(self.tsk_dir, new_path, content);
+            self.tsk_dir.deleteFile(old_path) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => return err,
             };
@@ -1549,7 +1549,7 @@ pub const Storage = struct {
             const updated_content = try serializeFrontmatter(self.allocator, issue.withBlocks(blocks_slice));
             defer self.allocator.free(updated_content);
 
-            try writeFileAtomic(self.dots_dir, path, updated_content);
+            try writeFileAtomic(self.tsk_dir, path, updated_content);
         }
     }
 
@@ -1599,7 +1599,7 @@ pub const Storage = struct {
             const content = try serializeFrontmatter(self.allocator, issue.withBlocks(blocks_slice));
             defer self.allocator.free(content);
 
-            try writeFileAtomic(self.dots_dir, path, content);
+            try writeFileAtomic(self.tsk_dir, path, content);
         }
     }
 
@@ -1610,11 +1610,11 @@ pub const Storage = struct {
             issues.deinit(self.allocator);
         }
 
-        // Collect from main dots dir
-        try self.collectIssuesFromDir(self.dots_dir, "", null, &issues);
+        // Collect from main tsk dir
+        try self.collectIssuesFromDir(self.tsk_dir, "", null, &issues);
 
         // Also collect from archive
-        if (self.dots_dir.openDir("archive", .{ .iterate = true })) |archive_dir| {
+        if (self.tsk_dir.openDir("archive", .{ .iterate = true })) |archive_dir| {
             var ad = archive_dir;
             defer ad.close();
             try self.collectIssuesFromDir(ad, "archive", null, &issues);
@@ -1633,7 +1633,7 @@ pub const Storage = struct {
             issues.deinit(self.allocator);
         }
 
-        try self.collectIssuesFromDir(self.dots_dir, "", status_filter, &issues);
+        try self.collectIssuesFromDir(self.tsk_dir, "", status_filter, &issues);
 
         // Sort by priority, then created_at
         std.mem.sort(Issue, issues.items, {}, Issue.order);
@@ -1749,7 +1749,7 @@ pub const Storage = struct {
     }
 
     fn appendOrphanChildren(self: *Self, folder_name: []const u8, issues: *std.ArrayList(Issue)) !void {
-        var folder = self.dots_dir.openDir(folder_name, .{ .iterate = true }) catch |err| switch (err) {
+        var folder = self.tsk_dir.openDir(folder_name, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => return,
             else => return err,
         };
@@ -1784,8 +1784,8 @@ pub const Storage = struct {
     ) !void {
         if (issues == null and orphans == null) return;
 
-        // Only collect from root level of .dots (not archive, not subdirs for children)
-        var iter = self.dots_dir.iterate();
+        // Only collect from root level of .tsk (not archive, not subdirs for children)
+        var iter = self.tsk_dir.iterate();
         while (try iter.next()) |entry| {
             if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".md")) {
                 if (issues) |list| {
@@ -1878,7 +1878,7 @@ pub const Storage = struct {
     }
 
     fn promoteOrphanFolder(self: *Self, folder_name: []const u8) !usize {
-        var folder = self.dots_dir.openDir(folder_name, .{ .iterate = true }) catch |err| switch (err) {
+        var folder = self.tsk_dir.openDir(folder_name, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => return 0,
             else => return err,
         };
@@ -1899,7 +1899,7 @@ pub const Storage = struct {
         }
 
         for (names.items) |name| {
-            if (self.dots_dir.statFile(name)) |_| {
+            if (self.tsk_dir.statFile(name)) |_| {
                 return StorageError.IssueAlreadyExists;
             } else |_| {}
         }
@@ -1907,7 +1907,7 @@ pub const Storage = struct {
         for (names.items) |name| {
             var src_buf: [MAX_PATH_LEN]u8 = undefined;
             const src = std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ folder_name, name }) catch return StorageError.IoError;
-            self.dots_dir.rename(src, name) catch |err| switch (err) {
+            self.tsk_dir.rename(src, name) catch |err| switch (err) {
                 error.PathAlreadyExists => return StorageError.IssueAlreadyExists,
                 else => return err,
             };
@@ -1917,7 +1917,7 @@ pub const Storage = struct {
         for (names.items) |name| self.allocator.free(name);
         names.deinit(self.allocator);
 
-        self.dots_dir.deleteDir(folder_name) catch |err| switch (err) {
+        self.tsk_dir.deleteDir(folder_name) catch |err| switch (err) {
             error.DirNotEmpty => {},
             error.FileNotFound => {},
             else => return err,
@@ -1934,7 +1934,7 @@ pub const Storage = struct {
         }
 
         // Open parent folder
-        var folder = self.dots_dir.openDir(parent_id, .{ .iterate = true }) catch |err| switch (err) {
+        var folder = self.tsk_dir.openDir(parent_id, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => return children.toOwnedSlice(self.allocator),
             else => return err,
         };
@@ -2168,7 +2168,7 @@ pub const Storage = struct {
             const content = try serializeFrontmatter(self.allocator, issue.withBlocks(blocks_slice));
             defer self.allocator.free(content);
 
-            try writeFileAtomic(self.dots_dir, path, content);
+            try writeFileAtomic(self.tsk_dir, path, content);
         }
         // "parent-child" type is handled by file location, not frontmatter
     }
@@ -2217,18 +2217,18 @@ pub const Storage = struct {
 
     pub fn purgeArchive(self: *Self) !void {
         // deleteTree succeeds silently if the directory doesn't exist
-        try self.dots_dir.deleteTree("archive");
+        try self.tsk_dir.deleteTree("archive");
 
         // Recreate empty archive directory (handle race if another process recreated it)
-        self.dots_dir.makeDir("archive") catch |err| switch (err) {
+        self.tsk_dir.makeDir("archive") catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
     }
 
-    // Config stored in .dots/config as simple key=value lines
+    // Config stored in .tsk/config as simple key=value lines
     pub fn getConfig(self: *Self, key: []const u8) !?[]const u8 {
-        const file = self.dots_dir.openFile("config", .{}) catch |err| switch (err) {
+        const file = self.tsk_dir.openFile("config", .{}) catch |err| switch (err) {
             error.FileNotFound => return null,
             else => return err,
         };
@@ -2260,7 +2260,7 @@ pub const Storage = struct {
             config.deinit();
         }
 
-        const file = self.dots_dir.openFile("config", .{}) catch |err| switch (err) {
+        const file = self.tsk_dir.openFile("config", .{}) catch |err| switch (err) {
             error.FileNotFound => null,
             else => return err,
         };
@@ -2314,6 +2314,6 @@ pub const Storage = struct {
             try buf.append(self.allocator, '\n');
         }
 
-        try writeFileAtomic(self.dots_dir, "config", buf.items);
+        try writeFileAtomic(self.tsk_dir, "config", buf.items);
     }
 };

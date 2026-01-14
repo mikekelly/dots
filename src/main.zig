@@ -12,7 +12,7 @@ const Storage = storage_mod.Storage;
 const Issue = storage_mod.Issue;
 const Status = storage_mod.Status;
 
-const DOTS_DIR = storage_mod.DOTS_DIR;
+const TSK_DIR = storage_mod.TSK_DIR;
 const max_jsonl_line_bytes = 1024 * 1024;
 const default_priority: i64 = 2;
 const MIN_PRIORITY: i64 = 0;
@@ -72,7 +72,7 @@ fn run() !void {
         } else if (std.mem.eql(u8, cmd, "hook")) {
             fatal("Unknown command: hook\n", .{});
         } else {
-            // Quick add: dot "title"
+            // Quick add: tsk "title"
             try cmdAdd(allocator, args[1..]);
         }
     }
@@ -94,7 +94,7 @@ fn cmdHelp(_: Allocator, _: []const []const u8) !void {
 }
 
 fn cmdVersion(_: Allocator, _: []const []const u8) !void {
-    return stdout().print("dots {s} ({s})\n", .{ build_options.version, build_options.git_hash });
+    return stdout().print("tsk {s} ({s})\n", .{ build_options.version, build_options.git_hash });
 }
 
 fn openStorage(allocator: Allocator) !Storage {
@@ -131,7 +131,7 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
 fn handleError(err: anyerror) noreturn {
     switch (err) {
         error.OutOfMemory => fatal("Out of memory\n", .{}),
-        error.FileNotFound => fatal("Missing issue file or directory in .dots\n", .{}),
+        error.FileNotFound => fatal("Missing issue file or directory in .tsk\n", .{}),
         error.AccessDenied => fatal("Permission denied\n", .{}),
         error.NotDir => fatal("Expected a directory but found a file\n", .{}),
         error.InvalidFrontmatter => fatal("Invalid issue frontmatter\n", .{}),
@@ -192,43 +192,43 @@ fn hasFlag(args: []const []const u8, flag: []const u8) bool {
 }
 
 const USAGE =
-    \\dots - Connect the dots
+    \\tsk - Task tracker
     \\
-    \\Usage: dot [command] [options]
+    \\Usage: tsk [command] [options]
     \\
     \\Commands:
-    \\  dot "title"                  Quick add a dot
-    \\  dot add "title" [options]    Add a dot (-p priority, -d desc, -P parent, -a after)
-    \\  dot ls [--status S] [--json] List dots
-    \\  dot on <id>                  Start working (turn it on!)
-    \\  dot off <id> [-r reason]     Complete ("cross it off")
-    \\  dot rm <id>                  Remove a dot
-    \\  dot show <id>                Show dot details
-    \\  dot ready [--json]           Show unblocked dots
-    \\  dot tree [id]                Show hierarchy (with id: includes closed children)
-    \\  dot fix                      Repair missing parents
-    \\  dot find "query"             Search all dots (open first, then archived)
-    \\  dot purge                    Delete archived dots
-    \\  dot init                     Initialize .dots directory
+    \\  tsk "title"                  Quick add a task
+    \\  tsk add "title" [options]    Add a task (-p priority, -d desc, -P parent, -a after)
+    \\  tsk ls [--status S] [--json] List tasks
+    \\  tsk on <id>                  Start working (turn it on!)
+    \\  tsk off <id> [-r reason]     Complete ("cross it off")
+    \\  tsk rm <id>                  Remove a task
+    \\  tsk show <id>                Show task details
+    \\  tsk ready [--json]           Show unblocked tasks
+    \\  tsk tree [id]                Show hierarchy (with id: includes closed children)
+    \\  tsk fix                      Repair missing parents
+    \\  tsk find "query"             Search all tasks (open first, then archived)
+    \\  tsk purge                    Delete archived tasks
+    \\  tsk init                     Initialize .tsk directory
     \\
     \\Examples:
-    \\  dot "Fix the bug"
-    \\  dot add "Design API" -p 1 -d "REST endpoints"
-    \\  dot add "Implement" -P dots-1 -a dots-2
-    \\  dot on dots-3
-    \\  dot off dots-3 -r "shipped"
+    \\  tsk "Fix the bug"
+    \\  tsk add "Design API" -p 1 -d "REST endpoints"
+    \\  tsk add "Implement" -P tsk-1 -a tsk-2
+    \\  tsk on tsk-3
+    \\  tsk off tsk-3 -r "shipped"
     \\
 ;
 
-fn gitAddDots(allocator: Allocator) !void {
-    // Add .dots to git if in a git repo
+fn gitAddTsk(allocator: Allocator) !void {
+    // Add .tsk to git if in a git repo
     fs.cwd().access(".git", .{}) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
 
-    // Run git add .dots
-    var child = std.process.Child.init(&.{ "git", "add", DOTS_DIR }, allocator);
+    // Run git add .tsk
+    var child = std.process.Child.init(&.{ "git", "add", TSK_DIR }, allocator);
     const term = try child.spawnAndWait();
     switch (term) {
         .Exited => |code| {
@@ -256,11 +256,11 @@ fn cmdInit(allocator: Allocator, args: []const []const u8) !void {
         }
     }
 
-    try gitAddDots(allocator);
+    try gitAddTsk(allocator);
 }
 
 fn cmdAdd(allocator: Allocator, args: []const []const u8) !void {
-    if (args.len == 0) fatal("Usage: dot add <title> [options]\n", .{});
+    if (args.len == 0) fatal("Usage: tsk add <title> [options]\n", .{});
 
     var title: []const u8 = "";
     var description: []const u8 = "";
@@ -463,7 +463,7 @@ fn writeIssueList(issues: []const Issue, skip_done: bool, use_json: bool) !void 
 }
 
 fn cmdOn(allocator: Allocator, args: []const []const u8) !void {
-    if (args.len == 0) fatal("Usage: dot on <id> [id2 ...]\n", .{});
+    if (args.len == 0) fatal("Usage: tsk on <id> [id2 ...]\n", .{});
 
     var storage = try openStorage(allocator);
     defer storage.close();
@@ -481,7 +481,7 @@ fn cmdOn(allocator: Allocator, args: []const []const u8) !void {
 }
 
 fn cmdOff(allocator: Allocator, args: []const []const u8) !void {
-    if (args.len == 0) fatal("Usage: dot off <id> [id2 ...] [-r reason]\n", .{});
+    if (args.len == 0) fatal("Usage: tsk off <id> [id2 ...] [-r reason]\n", .{});
 
     var reason: ?[]const u8 = null;
     var ids: std.ArrayList([]const u8) = .{};
@@ -496,7 +496,7 @@ fn cmdOff(allocator: Allocator, args: []const []const u8) !void {
         }
     }
 
-    if (ids.items.len == 0) fatal("Usage: dot off <id> [id2 ...] [-r reason]\n", .{});
+    if (ids.items.len == 0) fatal("Usage: tsk off <id> [id2 ...] [-r reason]\n", .{});
 
     var storage = try openStorage(allocator);
     defer storage.close();
@@ -520,7 +520,7 @@ fn cmdOff(allocator: Allocator, args: []const []const u8) !void {
 }
 
 fn cmdRm(allocator: Allocator, args: []const []const u8) !void {
-    if (args.len == 0) fatal("Usage: dot rm <id> [id2 ...]\n", .{});
+    if (args.len == 0) fatal("Usage: tsk rm <id> [id2 ...]\n", .{});
 
     var storage = try openStorage(allocator);
     defer storage.close();
@@ -538,7 +538,7 @@ fn cmdRm(allocator: Allocator, args: []const []const u8) !void {
 }
 
 fn cmdShow(allocator: Allocator, args: []const []const u8) !void {
-    if (args.len == 0) fatal("Usage: dot show <id>\n", .{});
+    if (args.len == 0) fatal("Usage: tsk show <id>\n", .{});
 
     var storage = try openStorage(allocator);
     defer storage.close();
@@ -566,21 +566,21 @@ fn cmdTree(allocator: Allocator, args: []const []const u8) !void {
     if (hasFlag(args, "--help") or hasFlag(args, "-h")) {
         const w = stdout();
         try w.writeAll(
-            \\Usage: dot tree [id]
+            \\Usage: tsk tree [id]
             \\
-            \\Show dot hierarchy.
+            \\Show task hierarchy.
             \\
-            \\Without arguments: shows all open root dots and their children.
-            \\With id: shows that specific dot's tree (including closed children).
+            \\Without arguments: shows all open root tasks and their children.
+            \\With id: shows that specific task's tree (including closed children).
             \\
             \\Examples:
-            \\  dot tree                    Show all open root dots
-            \\  dot tree my-project         Show specific dot and its children
+            \\  tsk tree                    Show all open root tasks
+            \\  tsk tree my-project         Show specific task and its children
             \\
         );
         return;
     }
-    if (args.len > 1) fatal("Usage: dot tree [id]\n", .{});
+    if (args.len > 1) fatal("Usage: tsk tree [id]\n", .{});
 
     var storage = try openStorage(allocator);
     defer storage.close();
@@ -651,15 +651,15 @@ fn cmdFind(allocator: Allocator, args: []const []const u8) !void {
     if (args.len == 0 or hasFlag(args, "--help") or hasFlag(args, "-h")) {
         const w = stdout();
         try w.writeAll(
-            \\Usage: dot find <query>
+            \\Usage: tsk find <query>
             \\
-            \\Search all dots (open first, then archived).
+            \\Search all tasks (open first, then archived).
             \\
             \\Searches: title, description, close-reason, created-at, closed-at
             \\
             \\Examples:
-            \\  dot find "auth"      Search for dots mentioning auth
-            \\  dot find "2026-01"   Find dots from January 2026
+            \\  tsk find "auth"      Search for tasks mentioning auth
+            \\  tsk find "2026-01"   Find tasks from January 2026
             \\
         );
         return;
@@ -685,7 +685,7 @@ fn cmdFind(allocator: Allocator, args: []const []const u8) !void {
 }
 
 fn cmdUpdate(allocator: Allocator, args: []const []const u8) !void {
-    if (args.len == 0) fatal("Usage: dot update <id> [--status S]\n", .{});
+    if (args.len == 0) fatal("Usage: tsk update <id> [--status S]\n", .{});
 
     var new_status: ?Status = null;
     var i: usize = 1;
@@ -711,7 +711,7 @@ fn cmdUpdate(allocator: Allocator, args: []const []const u8) !void {
 }
 
 fn cmdClose(allocator: Allocator, args: []const []const u8) !void {
-    if (args.len == 0) fatal("Usage: dot close <id> [--reason R]\n", .{});
+    if (args.len == 0) fatal("Usage: tsk close <id> [--reason R]\n", .{});
 
     var reason: ?[]const u8 = null;
     var i: usize = 1;
@@ -762,7 +762,7 @@ fn cmdSlugify(allocator: Allocator, _: []const []const u8) !void {
     }
 
     try stdout().print("Slugified {d} issue(s)\n", .{count});
-    try gitAddDots(allocator);
+    try gitAddTsk(allocator);
 }
 
 fn slugifyIssue(allocator: Allocator, storage: *Storage, prefix: []const u8, old_id: []const u8, title: []const u8) !bool {

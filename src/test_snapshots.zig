@@ -3,7 +3,7 @@ const fs = std.fs;
 const h = @import("test_helpers.zig");
 
 const OhSnap = h.OhSnap;
-const runDot = h.runDot;
+const runTsk = h.runTsk;
 const trimNewline = h.trimNewline;
 const normalizeTreeOutput = h.normalizeTreeOutput;
 const setupTestDirOrPanic = h.setupTestDirOrPanic;
@@ -33,13 +33,13 @@ test "snap: markdown frontmatter format" {
     const test_dir = setupTestDirOrPanic(allocator);
     defer cleanupTestDirAndFree(allocator, test_dir);
 
-    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+    const init = runTsk(allocator, &.{"init"}, test_dir) catch |err| {
         std.debug.panic("init: {}", .{err});
     };
     defer init.deinit(allocator);
 
     // Add a task with specific parameters
-    const add = runDot(allocator, &.{
+    const add = runTsk(allocator, &.{
         "add", "Test snapshot task",
         "-p",  "1",
         "-d",  "This is a description",
@@ -51,7 +51,7 @@ test "snap: markdown frontmatter format" {
     const id = trimNewline(add.stdout);
 
     // Read the markdown file
-    const md_path = std.fmt.allocPrint(allocator, "{s}/.dots/{s}.md", .{ test_dir, id }) catch |err| {
+    const md_path = std.fmt.allocPrint(allocator, "{s}/.tsk/{s}.md", .{ test_dir, id }) catch |err| {
         std.debug.panic("path: {}", .{err});
     };
     defer allocator.free(md_path);
@@ -101,23 +101,23 @@ test "snap: json output format" {
     const test_dir = setupTestDirOrPanic(allocator);
     defer cleanupTestDirAndFree(allocator, test_dir);
 
-    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+    const init = runTsk(allocator, &.{"init"}, test_dir) catch |err| {
         std.debug.panic("init: {}", .{err});
     };
     defer init.deinit(allocator);
 
     // Add tasks
-    const add1 = runDot(allocator, &.{ "add", "First task", "-p", "0" }, test_dir) catch |err| {
+    const add1 = runTsk(allocator, &.{ "add", "First task", "-p", "0" }, test_dir) catch |err| {
         std.debug.panic("add1: {}", .{err});
     };
     defer add1.deinit(allocator);
-    const add2 = runDot(allocator, &.{ "add", "Second task", "-p", "2" }, test_dir) catch |err| {
+    const add2 = runTsk(allocator, &.{ "add", "Second task", "-p", "2" }, test_dir) catch |err| {
         std.debug.panic("add2: {}", .{err});
     };
     defer add2.deinit(allocator);
 
     // Get JSON output
-    const ls = runDot(allocator, &.{ "ls", "--json" }, test_dir) catch |err| {
+    const ls = runTsk(allocator, &.{ "ls", "--json" }, test_dir) catch |err| {
         std.debug.panic("ls: {}", .{err});
     };
     defer ls.deinit(allocator);
@@ -171,13 +171,13 @@ test "snap: tree output format" {
     const test_dir = setupTestDirOrPanic(allocator);
     defer cleanupTestDirAndFree(allocator, test_dir);
 
-    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+    const init = runTsk(allocator, &.{"init"}, test_dir) catch |err| {
         std.debug.panic("init: {}", .{err});
     };
     defer init.deinit(allocator);
 
     // Add parent
-    const parent = runDot(allocator, &.{ "add", "Parent task" }, test_dir) catch |err| {
+    const parent = runTsk(allocator, &.{ "add", "Parent task" }, test_dir) catch |err| {
         std.debug.panic("add parent: {}", .{err});
     };
     defer parent.deinit(allocator);
@@ -185,19 +185,19 @@ test "snap: tree output format" {
     const parent_id = trimNewline(parent.stdout);
 
     // Add children
-    const child1 = runDot(allocator, &.{ "add", "Child one", "-P", parent_id }, test_dir) catch |err| {
+    const child1 = runTsk(allocator, &.{ "add", "Child one", "-P", parent_id }, test_dir) catch |err| {
         std.debug.panic("add child1: {}", .{err});
     };
     defer child1.deinit(allocator);
     const child1_id = trimNewline(child1.stdout);
 
-    const child2 = runDot(allocator, &.{ "add", "Child two", "-P", parent_id, "-a", child1_id }, test_dir) catch |err| {
+    const child2 = runTsk(allocator, &.{ "add", "Child two", "-P", parent_id, "-a", child1_id }, test_dir) catch |err| {
         std.debug.panic("add child2: {}", .{err});
     };
     defer child2.deinit(allocator);
 
     // Get tree output
-    const tree = runDot(allocator, &.{"tree"}, test_dir) catch |err| {
+    const tree = runTsk(allocator, &.{"tree"}, test_dir) catch |err| {
         std.debug.panic("tree: {}", .{err});
     };
     defer tree.deinit(allocator);

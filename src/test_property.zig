@@ -10,7 +10,7 @@ const OpType = h.OpType;
 const JsonIssue = h.JsonIssue;
 const fixed_timestamp = h.fixed_timestamp;
 const makeTestIssue = h.makeTestIssue;
-const runDot = h.runDot;
+const runTsk = h.runTsk;
 const isExitCode = h.isExitCode;
 const trimNewline = h.trimNewline;
 const oracleReady = h.oracleReady;
@@ -247,12 +247,12 @@ test "prop: update done sets closed_at" {
             const test_dir = setupTestDirOrPanic(allocator);
             defer cleanupTestDirAndFree(allocator, test_dir);
 
-            const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+            const init = runTsk(allocator, &.{"init"}, test_dir) catch |err| {
                 std.debug.panic("init: {}", .{err});
             };
             defer init.deinit(allocator);
 
-            const add = runDot(allocator, &.{ "add", "Update done test" }, test_dir) catch |err| {
+            const add = runTsk(allocator, &.{ "add", "Update done test" }, test_dir) catch |err| {
                 std.debug.panic("add: {}", .{err});
             };
             defer add.deinit(allocator);
@@ -261,13 +261,13 @@ test "prop: update done sets closed_at" {
             if (id.len == 0) return false;
 
             const status = if (args.done) "done" else "open";
-            const update = runDot(allocator, &.{ "update", id, "--status", status }, test_dir) catch |err| {
+            const update = runTsk(allocator, &.{ "update", id, "--status", status }, test_dir) catch |err| {
                 std.debug.panic("update: {}", .{err});
             };
             defer update.deinit(allocator);
             if (!isExitCode(update.term, 0)) return false;
 
-            const show = runDot(allocator, &.{ "show", id }, test_dir) catch |err| {
+            const show = runTsk(allocator, &.{ "show", id }, test_dir) catch |err| {
                 std.debug.panic("show: {}", .{err});
             };
             defer show.deinit(allocator);
@@ -299,7 +299,7 @@ test "prop: unknown id errors" {
             const test_dir = setupTestDirOrPanic(allocator);
             defer cleanupTestDirAndFree(allocator, test_dir);
 
-            const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+            const init = runTsk(allocator, &.{"init"}, test_dir) catch |err| {
                 std.debug.panic("init: {}", .{err});
             };
             defer init.deinit(allocator);
@@ -310,14 +310,14 @@ test "prop: unknown id errors" {
             }
             const id = id_buf[0..];
 
-            const on_result = runDot(allocator, &.{ "on", id }, test_dir) catch |err| {
+            const on_result = runTsk(allocator, &.{ "on", id }, test_dir) catch |err| {
                 std.debug.panic("on: {}", .{err});
             };
             defer on_result.deinit(allocator);
             if (!isExitCode(on_result.term, 1)) return false;
             if (std.mem.indexOf(u8, on_result.stderr, "Issue not found") == null) return false;
 
-            const rm_result = runDot(allocator, &.{ "rm", id }, test_dir) catch |err| {
+            const rm_result = runTsk(allocator, &.{ "rm", id }, test_dir) catch |err| {
                 std.debug.panic("rm: {}", .{err});
             };
             defer rm_result.deinit(allocator);
@@ -342,7 +342,7 @@ test "prop: invalid dependency rejected" {
             const test_dir = setupTestDirOrPanic(allocator);
             defer cleanupTestDirAndFree(allocator, test_dir);
 
-            const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+            const init = runTsk(allocator, &.{"init"}, test_dir) catch |err| {
                 std.debug.panic("init: {}", .{err});
             };
             defer init.deinit(allocator);
@@ -356,7 +356,7 @@ test "prop: invalid dependency rejected" {
 
             // Try to create with invalid dependency
             const flag: []const u8 = if (args.use_parent) "-P" else "-a";
-            const result = runDot(allocator, &.{ "add", "Test task", flag, fake_id }, test_dir) catch |err| {
+            const result = runTsk(allocator, &.{ "add", "Test task", flag, fake_id }, test_dir) catch |err| {
                 std.debug.panic("add: {}", .{err});
             };
             defer allocator.free(result.stdout);
@@ -367,7 +367,7 @@ test "prop: invalid dependency rejected" {
             if (std.mem.indexOf(u8, result.stderr, "not found") == null) return false;
 
             // No issue should be created
-            const list = runDot(allocator, &.{ "ls", "--json" }, test_dir) catch |err| {
+            const list = runTsk(allocator, &.{ "ls", "--json" }, test_dir) catch |err| {
                 std.debug.panic("ls: {}", .{err});
             };
             defer allocator.free(list.stdout);

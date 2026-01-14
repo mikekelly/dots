@@ -7,7 +7,7 @@ const OhSnap = h.OhSnap;
 const Issue = h.Issue;
 const fixed_timestamp = h.fixed_timestamp;
 const makeTestIssue = h.makeTestIssue;
-const runDot = h.runDot;
+const runTsk = h.runTsk;
 const isExitCode = h.isExitCode;
 const JsonIssue = h.JsonIssue;
 const setupTestDirOrPanic = h.setupTestDirOrPanic;
@@ -123,7 +123,7 @@ test "slugify: prop: idempotent on valid slugs" {
     }.property, .{ .iterations = 50, .seed = 123 });
 }
 
-test "cli: slugify skips already-slugged issues from dot add" {
+test "cli: slugify skips already-slugged issues from tsk add" {
     const allocator = std.testing.allocator;
     const oh = OhSnap{};
 
@@ -131,15 +131,15 @@ test "cli: slugify skips already-slugged issues from dot add" {
     defer cleanupTestDirAndFree(allocator, test_dir);
 
     // Init
-    const init = try runDot(allocator, &.{"init"}, test_dir);
+    const init = try runTsk(allocator, &.{"init"}, test_dir);
     defer init.deinit(allocator);
 
-    // Create an issue - dot add already creates slugified IDs
-    const add = try runDot(allocator, &.{ "add", "Fix authentication bug" }, test_dir);
+    // Create an issue - tsk add already creates slugified IDs
+    const add = try runTsk(allocator, &.{ "add", "Fix authentication bug" }, test_dir);
     defer add.deinit(allocator);
 
     // Get the created issue ID
-    const ls1 = try runDot(allocator, &.{ "ls", "--json" }, test_dir);
+    const ls1 = try runTsk(allocator, &.{ "ls", "--json" }, test_dir);
     defer ls1.deinit(allocator);
 
     const parsed1 = try std.json.parseFromSlice([]JsonIssue, allocator, ls1.stdout, .{
@@ -157,7 +157,7 @@ test "cli: slugify skips already-slugged issues from dot add" {
     ).expectEqual(std.mem.indexOf(u8, old_id, "fix-auth") != null);
 
     // Slugify - should skip since already slugified
-    const slugify = try runDot(allocator, &.{"slugify"}, test_dir);
+    const slugify = try runTsk(allocator, &.{"slugify"}, test_dir);
     defer slugify.deinit(allocator);
     try std.testing.expect(isExitCode(slugify.term, 0));
 
@@ -168,7 +168,7 @@ test "cli: slugify skips already-slugged issues from dot add" {
     ).expectEqual(std.mem.indexOf(u8, slugify.stdout, "Slugified 0") != null);
 
     // ID should be unchanged
-    const ls2 = try runDot(allocator, &.{ "ls", "--json" }, test_dir);
+    const ls2 = try runTsk(allocator, &.{ "ls", "--json" }, test_dir);
     defer ls2.deinit(allocator);
 
     const parsed2 = try std.json.parseFromSlice([]JsonIssue, allocator, ls2.stdout, .{
@@ -185,12 +185,12 @@ test "cli: slugify preserves hex suffix from original ID" {
     const test_dir = setupTestDirOrPanic(allocator);
     defer cleanupTestDirAndFree(allocator, test_dir);
 
-    // Create storage and set prefix to "dots"
+    // Create storage and set prefix to "tsk"
     var ts = openTestStorage(allocator, test_dir);
-    try ts.storage.setConfig("prefix", "dots");
+    try ts.storage.setConfig("prefix", "tsk");
 
     const issue = Issue{
-        .id = "dots-abcd1234",
+        .id = "tsk-abcd1234",
         .title = "Database migration",
         .description = "",
         .status = .open,
@@ -206,12 +206,12 @@ test "cli: slugify preserves hex suffix from original ID" {
     ts.deinit();
 
     // Slugify
-    const slugify = try runDot(allocator, &.{"slugify"}, test_dir);
+    const slugify = try runTsk(allocator, &.{"slugify"}, test_dir);
     defer slugify.deinit(allocator);
     try std.testing.expect(isExitCode(slugify.term, 0));
 
     // Verify new ID preserves hex suffix
-    const ls = try runDot(allocator, &.{ "ls", "--json" }, test_dir);
+    const ls = try runTsk(allocator, &.{ "ls", "--json" }, test_dir);
     defer ls.deinit(allocator);
 
     const parsed = try std.json.parseFromSlice([]JsonIssue, allocator, ls.stdout, .{
@@ -223,7 +223,7 @@ test "cli: slugify preserves hex suffix from original ID" {
     const new_id = parsed.value[0].id;
 
     // Should have slug and preserve hex suffix
-    try std.testing.expectEqualStrings("dots-db-migration-abcd1234", new_id);
+    try std.testing.expectEqualStrings("tsk-db-migration-abcd1234", new_id);
 }
 
 test "cli: slugify updates dependency references" {
@@ -233,11 +233,11 @@ test "cli: slugify updates dependency references" {
     defer cleanupTestDirAndFree(allocator, test_dir);
 
     var ts = openTestStorage(allocator, test_dir);
-    try ts.storage.setConfig("prefix", "dots");
+    try ts.storage.setConfig("prefix", "tsk");
 
     // Create blocker issue
     const blocker = Issue{
-        .id = "dots-11111111",
+        .id = "tsk-11111111",
         .title = "API endpoint",
         .description = "",
         .status = .open,
@@ -253,7 +253,7 @@ test "cli: slugify updates dependency references" {
 
     // Create dependent issue
     const dependent = Issue{
-        .id = "dots-22222222",
+        .id = "tsk-22222222",
         .title = "Frontend integration",
         .description = "",
         .status = .open,
@@ -268,11 +268,11 @@ test "cli: slugify updates dependency references" {
     try ts.storage.createIssue(dependent, null);
 
     // Add dependency
-    try ts.storage.addDependency("dots-22222222", "dots-11111111", "blocks");
+    try ts.storage.addDependency("tsk-22222222", "tsk-11111111", "blocks");
     ts.deinit();
 
     // Slugify all
-    const slugify = try runDot(allocator, &.{"slugify"}, test_dir);
+    const slugify = try runTsk(allocator, &.{"slugify"}, test_dir);
     defer slugify.deinit(allocator);
     try std.testing.expect(isExitCode(slugify.term, 0));
 
@@ -299,7 +299,7 @@ test "cli: slugify updates dependency references" {
 
     // Block should reference the new slugified ID
     try std.testing.expectEqual(@as(usize, 1), updated_dep.blocks.len);
-    try std.testing.expectEqualStrings("dots-api-endpoint-11111111", updated_dep.blocks[0]);
+    try std.testing.expectEqualStrings("tsk-api-endpoint-11111111", updated_dep.blocks[0]);
 }
 
 test "cli: slugify skips already-slugified IDs" {
@@ -310,11 +310,11 @@ test "cli: slugify skips already-slugified IDs" {
     defer cleanupTestDirAndFree(allocator, test_dir);
 
     var ts = openTestStorage(allocator, test_dir);
-    try ts.storage.setConfig("prefix", "dots");
+    try ts.storage.setConfig("prefix", "tsk");
 
     // Create issue with already-slugified ID
     const issue = Issue{
-        .id = "dots-fix-auth-bug-abcd1234",
+        .id = "tsk-fix-auth-bug-abcd1234",
         .title = "Fix authentication bug",
         .description = "",
         .status = .open,
@@ -330,7 +330,7 @@ test "cli: slugify skips already-slugified IDs" {
     ts.deinit();
 
     // Slugify - should skip
-    const slugify = try runDot(allocator, &.{"slugify"}, test_dir);
+    const slugify = try runTsk(allocator, &.{"slugify"}, test_dir);
     defer slugify.deinit(allocator);
     try std.testing.expect(isExitCode(slugify.term, 0));
 
@@ -341,7 +341,7 @@ test "cli: slugify skips already-slugified IDs" {
     ).expectEqual(std.mem.indexOf(u8, slugify.stdout, "Slugified 0") != null);
 
     // ID should be unchanged
-    const ls = try runDot(allocator, &.{ "ls", "--json" }, test_dir);
+    const ls = try runTsk(allocator, &.{ "ls", "--json" }, test_dir);
     defer ls.deinit(allocator);
 
     const parsed = try std.json.parseFromSlice([]JsonIssue, allocator, ls.stdout, .{
@@ -349,7 +349,7 @@ test "cli: slugify skips already-slugified IDs" {
     });
     defer parsed.deinit();
 
-    try std.testing.expectEqualStrings("dots-fix-auth-bug-abcd1234", parsed.value[0].id);
+    try std.testing.expectEqualStrings("tsk-fix-auth-bug-abcd1234", parsed.value[0].id);
 }
 
 test "cli: slugify prop: preserves issue count" {
@@ -362,21 +362,21 @@ test "cli: slugify prop: preserves issue count" {
             defer cleanupTestDirAndFree(allocator, test_dir);
 
             var ts = openTestStorage(allocator, test_dir);
-            ts.storage.setConfig("prefix", "dots") catch return false;
+            ts.storage.setConfig("prefix", "tsk") catch return false;
 
             var id_buf: [20]u8 = undefined;
             for (0..n) |i| {
-                const id = std.fmt.bufPrint(&id_buf, "dots-{x:0>8}", .{@as(u32, @intCast(i)) + 0x10000000}) catch return false;
+                const id = std.fmt.bufPrint(&id_buf, "tsk-{x:0>8}", .{@as(u32, @intCast(i)) + 0x10000000}) catch return false;
                 const issue = makeTestIssue(id, .open);
                 ts.storage.createIssue(issue, null) catch return false;
             }
             ts.deinit();
 
-            const slugify = runDot(allocator, &.{"slugify"}, test_dir) catch return false;
+            const slugify = runTsk(allocator, &.{"slugify"}, test_dir) catch return false;
             defer slugify.deinit(allocator);
             if (!isExitCode(slugify.term, 0)) return false;
 
-            const ls = runDot(allocator, &.{ "ls", "--json" }, test_dir) catch return false;
+            const ls = runTsk(allocator, &.{ "ls", "--json" }, test_dir) catch return false;
             defer ls.deinit(allocator);
 
             const parsed = std.json.parseFromSlice([]JsonIssue, allocator, ls.stdout, .{
@@ -397,11 +397,11 @@ test "cli: slugify includes closed/archived issues" {
     defer cleanupTestDirAndFree(allocator, test_dir);
 
     var ts = openTestStorage(allocator, test_dir);
-    try ts.storage.setConfig("prefix", "dots");
+    try ts.storage.setConfig("prefix", "tsk");
 
     // Create open issue
     const open_issue = Issue{
-        .id = "dots-11111111",
+        .id = "tsk-11111111",
         .title = "Open task",
         .description = "",
         .status = .open,
@@ -417,7 +417,7 @@ test "cli: slugify includes closed/archived issues" {
 
     // Create closed issue
     const closed_issue = Issue{
-        .id = "dots-22222222",
+        .id = "tsk-22222222",
         .title = "Closed task",
         .description = "",
         .status = .closed,
@@ -433,7 +433,7 @@ test "cli: slugify includes closed/archived issues" {
     ts.deinit();
 
     // Slugify all
-    const slugify = try runDot(allocator, &.{"slugify"}, test_dir);
+    const slugify = try runTsk(allocator, &.{"slugify"}, test_dir);
     defer slugify.deinit(allocator);
     try std.testing.expect(isExitCode(slugify.term, 0));
 

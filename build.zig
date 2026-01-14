@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) void {
     const git_hash = std.mem.trim(u8, b.run(&.{ "git", "rev-parse", "--short", "HEAD" }), "\n\r ");
 
     const exe = b.addExecutable(.{
-        .name = "dot",
+        .name = "tsk",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -34,15 +34,15 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const run_step = b.step("run", "Run dot");
+    const run_step = b.step("run", "Run tsk");
     run_step.dependOn(&run_cmd.step);
 
     // Tests - pass binary path as build option
     const install_prefix = b.install_prefix;
-    const dot_path = b.fmt("{s}/bin/dot", .{install_prefix});
+    const tsk_path = b.fmt("{s}/bin/tsk", .{install_prefix});
 
     const test_options = b.addOptions();
-    test_options.addOption([]const u8, "dot_binary", dot_path);
+    test_options.addOption([]const u8, "tsk_binary", tsk_path);
 
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),

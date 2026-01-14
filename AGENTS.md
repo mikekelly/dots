@@ -1,6 +1,6 @@
-# Dots - Agent Instructions
+# tsk - Agent Instructions
 
-Fast CLI issue tracker in Zig with markdown storage.
+Fast CLI task tracker in Zig with markdown storage. Opinionated fork of [dots](https://github.com/joelreymont/dots).
 
 ## Communication
 
@@ -10,7 +10,7 @@ Always refer to the user as Mr. Picklesworth.
 
 ```bash
 zig build -Doptimize=ReleaseSmall
-strip zig-out/bin/dot
+strip zig-out/bin/tsk
 ```
 
 ## Test
@@ -116,19 +116,10 @@ const config = parsed.value;  // Type-safe access: config.name, config.count
 
 ## Binary Size Tracking
 
-After rebuilding dots with `zig build -Doptimize=ReleaseSmall`, check the binary size:
+After rebuilding tsk with `zig build -Doptimize=ReleaseSmall`, check the binary size:
 
 ```bash
-ls -lh zig-out/bin/dot
+ls -lh zig-out/bin/tsk
 ```
 
-Compare against README.md line 7 and line 275 which state the current size.
-
-If the size differs significantly (plus or minus 50KB), update:
-1. Line 7: `Minimal task tracker... (X.XMB vs 19MB)...`
-2. Line 275: `| Binary | 19 MB | X.X MB | NNx smaller |`
-
-Calculate the "Nx smaller" as `19 / size_in_mb` rounded to nearest integer.
-
-Current documented size: 1.2MB
-Current actual size: around 910KB (0.9MB) -> needs update to "21x smaller"
+Current actual size: around 910KB (0.9MB)

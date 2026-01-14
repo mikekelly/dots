@@ -5,7 +5,7 @@ const storage_mod = h.storage_mod;
 const zc = h.zc;
 const Issue = h.Issue;
 const fixed_timestamp = h.fixed_timestamp;
-const runDot = h.runDot;
+const runTsk = h.runTsk;
 const trimNewline = h.trimNewline;
 const isExitCode = h.isExitCode;
 const setupTestDirOrPanic = h.setupTestDirOrPanic;
@@ -330,32 +330,32 @@ test "cli: --after positions new task between existing tasks" {
     defer cleanupTestDirAndFree(allocator, test_dir);
 
     // Initialize
-    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+    const init = runTsk(allocator, &.{"init"}, test_dir) catch |err| {
         std.debug.panic("init: {}", .{err});
     };
     defer init.deinit(allocator);
 
     // Add first task
-    const add1 = runDot(allocator, &.{ "add", "Task A" }, test_dir) catch |err| {
+    const add1 = runTsk(allocator, &.{ "add", "Task A" }, test_dir) catch |err| {
         std.debug.panic("add1: {}", .{err});
     };
     defer add1.deinit(allocator);
     const id_a = trimNewline(add1.stdout);
 
     // Add second task (appends after first)
-    const add2 = runDot(allocator, &.{ "add", "Task C" }, test_dir) catch |err| {
+    const add2 = runTsk(allocator, &.{ "add", "Task C" }, test_dir) catch |err| {
         std.debug.panic("add2: {}", .{err});
     };
     defer add2.deinit(allocator);
 
     // Add third task positioned after first (between A and C)
-    const add3 = runDot(allocator, &.{ "add", "Task B", "--after", id_a }, test_dir) catch |err| {
+    const add3 = runTsk(allocator, &.{ "add", "Task B", "--after", id_a }, test_dir) catch |err| {
         std.debug.panic("add3: {}", .{err});
     };
     defer add3.deinit(allocator);
 
     // List and verify order is A, B, C
-    const list = runDot(allocator, &.{"list"}, test_dir) catch |err| {
+    const list = runTsk(allocator, &.{"list"}, test_dir) catch |err| {
         std.debug.panic("list: {}", .{err});
     };
     defer list.deinit(allocator);
@@ -379,26 +379,26 @@ test "cli: --before positions new task before existing task" {
     defer cleanupTestDirAndFree(allocator, test_dir);
 
     // Initialize
-    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+    const init = runTsk(allocator, &.{"init"}, test_dir) catch |err| {
         std.debug.panic("init: {}", .{err});
     };
     defer init.deinit(allocator);
 
     // Add first task
-    const add1 = runDot(allocator, &.{ "add", "Task B" }, test_dir) catch |err| {
+    const add1 = runTsk(allocator, &.{ "add", "Task B" }, test_dir) catch |err| {
         std.debug.panic("add1: {}", .{err});
     };
     defer add1.deinit(allocator);
     const id_b = trimNewline(add1.stdout);
 
     // Add second task positioned before first
-    const add2 = runDot(allocator, &.{ "add", "Task A", "--before", id_b }, test_dir) catch |err| {
+    const add2 = runTsk(allocator, &.{ "add", "Task A", "--before", id_b }, test_dir) catch |err| {
         std.debug.panic("add2: {}", .{err});
     };
     defer add2.deinit(allocator);
 
     // List and verify order is A, B
-    const list = runDot(allocator, &.{"list"}, test_dir) catch |err| {
+    const list = runTsk(allocator, &.{"list"}, test_dir) catch |err| {
         std.debug.panic("list: {}", .{err});
     };
     defer list.deinit(allocator);
@@ -455,7 +455,7 @@ test "cli: --after infers parent from target issue" {
     ts.deinit();
 
     // Add new child using --after (should infer parent)
-    const add = runDot(allocator, &.{ "add", "Child B", "--after", "child-a" }, test_dir) catch |err| {
+    const add = runTsk(allocator, &.{ "add", "Child B", "--after", "child-a" }, test_dir) catch |err| {
         std.debug.panic("add: {}", .{err});
     };
     defer add.deinit(allocator);
@@ -479,25 +479,25 @@ test "cli: new tasks always get a peer-index" {
     defer cleanupTestDirAndFree(allocator, test_dir);
 
     // Initialize
-    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+    const init = runTsk(allocator, &.{"init"}, test_dir) catch |err| {
         std.debug.panic("init: {}", .{err});
     };
     defer init.deinit(allocator);
 
     // Add several tasks via CLI
-    const add1 = runDot(allocator, &.{ "add", "First task" }, test_dir) catch |err| {
+    const add1 = runTsk(allocator, &.{ "add", "First task" }, test_dir) catch |err| {
         std.debug.panic("add1: {}", .{err});
     };
     defer add1.deinit(allocator);
     const id1 = trimNewline(add1.stdout);
 
-    const add2 = runDot(allocator, &.{ "add", "Second task" }, test_dir) catch |err| {
+    const add2 = runTsk(allocator, &.{ "add", "Second task" }, test_dir) catch |err| {
         std.debug.panic("add2: {}", .{err});
     };
     defer add2.deinit(allocator);
     const id2 = trimNewline(add2.stdout);
 
-    const add3 = runDot(allocator, &.{ "add", "Third task" }, test_dir) catch |err| {
+    const add3 = runTsk(allocator, &.{ "add", "Third task" }, test_dir) catch |err| {
         std.debug.panic("add3: {}", .{err});
     };
     defer add3.deinit(allocator);
@@ -525,13 +525,13 @@ test "cli: first task gets peer-index 0" {
     const test_dir = setupTestDirOrPanic(allocator);
     defer cleanupTestDirAndFree(allocator, test_dir);
 
-    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+    const init = runTsk(allocator, &.{"init"}, test_dir) catch |err| {
         std.debug.panic("init: {}", .{err});
     };
     defer init.deinit(allocator);
 
     // Add first task to empty list
-    const add = runDot(allocator, &.{ "add", "First task" }, test_dir) catch |err| {
+    const add = runTsk(allocator, &.{ "add", "First task" }, test_dir) catch |err| {
         std.debug.panic("add: {}", .{err});
     };
     defer add.deinit(allocator);
@@ -553,25 +553,25 @@ test "cli: --after last task appends at end" {
     const test_dir = setupTestDirOrPanic(allocator);
     defer cleanupTestDirAndFree(allocator, test_dir);
 
-    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+    const init = runTsk(allocator, &.{"init"}, test_dir) catch |err| {
         std.debug.panic("init: {}", .{err});
     };
     defer init.deinit(allocator);
 
     // Add two tasks
-    const add1 = runDot(allocator, &.{ "add", "Task A" }, test_dir) catch |err| {
+    const add1 = runTsk(allocator, &.{ "add", "Task A" }, test_dir) catch |err| {
         std.debug.panic("add1: {}", .{err});
     };
     defer add1.deinit(allocator);
 
-    const add2 = runDot(allocator, &.{ "add", "Task B" }, test_dir) catch |err| {
+    const add2 = runTsk(allocator, &.{ "add", "Task B" }, test_dir) catch |err| {
         std.debug.panic("add2: {}", .{err});
     };
     defer add2.deinit(allocator);
     const id_b = trimNewline(add2.stdout);
 
     // Add task after the last one (B)
-    const add3 = runDot(allocator, &.{ "add", "Task C", "--after", id_b }, test_dir) catch |err| {
+    const add3 = runTsk(allocator, &.{ "add", "Task C", "--after", id_b }, test_dir) catch |err| {
         std.debug.panic("add3: {}", .{err});
     };
     defer add3.deinit(allocator);
@@ -595,20 +595,20 @@ test "cli: --before first task prepends at start" {
     const test_dir = setupTestDirOrPanic(allocator);
     defer cleanupTestDirAndFree(allocator, test_dir);
 
-    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+    const init = runTsk(allocator, &.{"init"}, test_dir) catch |err| {
         std.debug.panic("init: {}", .{err});
     };
     defer init.deinit(allocator);
 
     // Add first task
-    const add1 = runDot(allocator, &.{ "add", "Task B" }, test_dir) catch |err| {
+    const add1 = runTsk(allocator, &.{ "add", "Task B" }, test_dir) catch |err| {
         std.debug.panic("add1: {}", .{err});
     };
     defer add1.deinit(allocator);
     const id_b = trimNewline(add1.stdout);
 
     // Add task before the first one (B)
-    const add2 = runDot(allocator, &.{ "add", "Task A", "--before", id_b }, test_dir) catch |err| {
+    const add2 = runTsk(allocator, &.{ "add", "Task A", "--before", id_b }, test_dir) catch |err| {
         std.debug.panic("add2: {}", .{err});
     };
     defer add2.deinit(allocator);
@@ -701,49 +701,49 @@ test "cli: multiple sequential insertions at same position" {
     const test_dir = setupTestDirOrPanic(allocator);
     defer cleanupTestDirAndFree(allocator, test_dir);
 
-    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+    const init = runTsk(allocator, &.{"init"}, test_dir) catch |err| {
         std.debug.panic("init: {}", .{err});
     };
     defer init.deinit(allocator);
 
     // Add first two tasks: A and Z
-    const add_a = runDot(allocator, &.{ "add", "Task A" }, test_dir) catch |err| {
+    const add_a = runTsk(allocator, &.{ "add", "Task A" }, test_dir) catch |err| {
         std.debug.panic("add_a: {}", .{err});
     };
     defer add_a.deinit(allocator);
     const id_a = trimNewline(add_a.stdout);
 
-    const add_z = runDot(allocator, &.{ "add", "Task Z" }, test_dir) catch |err| {
+    const add_z = runTsk(allocator, &.{ "add", "Task Z" }, test_dir) catch |err| {
         std.debug.panic("add_z: {}", .{err});
     };
     defer add_z.deinit(allocator);
 
     // Insert B, C, D, E all after A (each bisects remaining space)
-    const add_b = runDot(allocator, &.{ "add", "Task B", "--after", id_a }, test_dir) catch |err| {
+    const add_b = runTsk(allocator, &.{ "add", "Task B", "--after", id_a }, test_dir) catch |err| {
         std.debug.panic("add_b: {}", .{err});
     };
     defer add_b.deinit(allocator);
     const id_b = trimNewline(add_b.stdout);
 
-    const add_c = runDot(allocator, &.{ "add", "Task C", "--after", id_b }, test_dir) catch |err| {
+    const add_c = runTsk(allocator, &.{ "add", "Task C", "--after", id_b }, test_dir) catch |err| {
         std.debug.panic("add_c: {}", .{err});
     };
     defer add_c.deinit(allocator);
     const id_c = trimNewline(add_c.stdout);
 
-    const add_d = runDot(allocator, &.{ "add", "Task D", "--after", id_c }, test_dir) catch |err| {
+    const add_d = runTsk(allocator, &.{ "add", "Task D", "--after", id_c }, test_dir) catch |err| {
         std.debug.panic("add_d: {}", .{err});
     };
     defer add_d.deinit(allocator);
     const id_d = trimNewline(add_d.stdout);
 
-    const add_e = runDot(allocator, &.{ "add", "Task E", "--after", id_d }, test_dir) catch |err| {
+    const add_e = runTsk(allocator, &.{ "add", "Task E", "--after", id_d }, test_dir) catch |err| {
         std.debug.panic("add_e: {}", .{err});
     };
     defer add_e.deinit(allocator);
 
     // Verify all tasks appear in correct order: A, B, C, D, E, Z
-    const list = runDot(allocator, &.{"list"}, test_dir) catch |err| {
+    const list = runTsk(allocator, &.{"list"}, test_dir) catch |err| {
         std.debug.panic("list: {}", .{err});
     };
     defer list.deinit(allocator);
@@ -917,7 +917,7 @@ test "cli: tree output maintains peer-index order in nested hierarchy" {
     ts.deinit();
 
     // Run tree command and verify order
-    const tree = runDot(allocator, &.{"tree"}, test_dir) catch |err| {
+    const tree = runTsk(allocator, &.{"tree"}, test_dir) catch |err| {
         std.debug.panic("tree: {}", .{err});
     };
     defer tree.deinit(allocator);
@@ -987,7 +987,7 @@ test "cli: --before infers parent from target issue" {
     ts.deinit();
 
     // Add new child using --before (should infer parent)
-    const add = runDot(allocator, &.{ "add", "Child A", "--before", "child-b" }, test_dir) catch |err| {
+    const add = runTsk(allocator, &.{ "add", "Child A", "--before", "child-b" }, test_dir) catch |err| {
         std.debug.panic("add: {}", .{err});
     };
     defer add.deinit(allocator);
@@ -1018,11 +1018,11 @@ test "prop: repeated bisection produces unique indices" {
             defer cleanupTestDirAndFree(allocator, test_dir);
 
             // Initialize
-            const init = runDot(allocator, &.{"init"}, test_dir) catch return false;
+            const init = runTsk(allocator, &.{"init"}, test_dir) catch return false;
             init.deinit(allocator);
 
             // Add first task
-            const add_first = runDot(allocator, &.{ "add", "Task-0" }, test_dir) catch return false;
+            const add_first = runTsk(allocator, &.{ "add", "Task-0" }, test_dir) catch return false;
             add_first.deinit(allocator);
 
             // Track task IDs in insertion order
@@ -1057,7 +1057,7 @@ test "prop: repeated bisection produces unique indices" {
                 var title_buf: [16]u8 = undefined;
                 const title = std.fmt.bufPrint(&title_buf, "Task-{d}", .{num_tasks}) catch return false;
 
-                const add = runDot(allocator, &.{ "add", title, "--after", after_id }, test_dir) catch return false;
+                const add = runTsk(allocator, &.{ "add", title, "--after", after_id }, test_dir) catch return false;
                 defer add.deinit(allocator);
 
                 const new_id = trimNewline(add.stdout);
@@ -1093,19 +1093,19 @@ test "cli: -P with --after is rejected" {
     const test_dir = setupTestDirOrPanic(allocator);
     defer cleanupTestDirAndFree(allocator, test_dir);
 
-    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+    const init = runTsk(allocator, &.{"init"}, test_dir) catch |err| {
         std.debug.panic("init: {}", .{err});
     };
     defer init.deinit(allocator);
 
-    const task = runDot(allocator, &.{ "add", "First task" }, test_dir) catch |err| {
+    const task = runTsk(allocator, &.{ "add", "First task" }, test_dir) catch |err| {
         std.debug.panic("add: {}", .{err});
     };
     defer task.deinit(allocator);
     const task_id = trimNewline(task.stdout);
 
     // Try to use both -P and --after - should fail
-    const result = runDot(allocator, &.{ "add", "New task", "-P", task_id, "--after", task_id }, test_dir) catch |err| {
+    const result = runTsk(allocator, &.{ "add", "New task", "-P", task_id, "--after", task_id }, test_dir) catch |err| {
         std.debug.panic("add with -P and --after: {}", .{err});
     };
     defer result.deinit(allocator);
@@ -1120,19 +1120,19 @@ test "cli: -P with --before is rejected" {
     const test_dir = setupTestDirOrPanic(allocator);
     defer cleanupTestDirAndFree(allocator, test_dir);
 
-    const init = runDot(allocator, &.{"init"}, test_dir) catch |err| {
+    const init = runTsk(allocator, &.{"init"}, test_dir) catch |err| {
         std.debug.panic("init: {}", .{err});
     };
     defer init.deinit(allocator);
 
-    const task = runDot(allocator, &.{ "add", "First task" }, test_dir) catch |err| {
+    const task = runTsk(allocator, &.{ "add", "First task" }, test_dir) catch |err| {
         std.debug.panic("add: {}", .{err});
     };
     defer task.deinit(allocator);
     const task_id = trimNewline(task.stdout);
 
     // Try to use both -P and --before - should fail
-    const result = runDot(allocator, &.{ "add", "New task", "-P", task_id, "--before", task_id }, test_dir) catch |err| {
+    const result = runTsk(allocator, &.{ "add", "New task", "-P", task_id, "--before", task_id }, test_dir) catch |err| {
         std.debug.panic("add with -P and --before: {}", .{err});
     };
     defer result.deinit(allocator);

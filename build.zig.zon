@@ -1,5 +1,5 @@
 .{
-    .name = .dots,
+    .name = .tsk,
     .version = "0.6.3",
     .dependencies = .{
         .ohsnap = .{
@@ -10,5 +10,5 @@
         },
     },
     .paths = .{""},
-    .fingerprint = 0x54d4af2155671ed5,
+    .fingerprint = 0x72cb8b7bf2132840,
 }
